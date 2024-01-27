@@ -1,0 +1,27 @@
+{
+    "launch": {
+        "version": "0.2.0",
+        "compounds": [],
+        "configurations": [
+            {
+                "name": "TRAIN",
+                "type": "python",
+                "request": "launch",
+                "cwd": "${workspaceFolder}/src",
+                "program": "train_coco.py",
+                "args": ["--batchsize", "16",
+                         "--trainRoot", "/data/coco/images/train2017/",
+                         "--trainAnn",  "/data/coco/annotations/instances_train2017.json",
+                         "--valRoot",   "/data/coco/images/val2017/",
+                         "--valAnn",    "/data/coco/annotations/instances_val2017.json"]
+            },
+            {
+                "name": "THIS",
+                "type": "python",
+                "request": "launch",
+                "cwd": "${workspaceFolder}/src",
+                "program": "${file}"
+            }
+        ]
+    }
+}

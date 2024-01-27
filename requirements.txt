@@ -1,0 +1,10 @@
+numpy
+torch
+torchvision
+einops
+onnx
+lightning
+tensorboard
+matplotlib
+pycocotools
+pyqt5

@@ -752,7 +752,7 @@ def load_from_ultralytics(net: Union[Yolov5, Yolov8]):
         copy_params(net.head.cv2, net2.model[22].cv2)
         copy_params(net.head.cv3, net2.model[22].cv3)
 
-def load_darknet(net: Union[Yolov3, Yolov3Tiny], weights_path: str):
+def load_darknet(net, weights_path: str):
     with open(weights_path, "rb") as f:
         major, minor, _ = np.fromfile(f, dtype=np.int32, count=3)
         steps = np.fromfile(f, count=1, dtype=np.int64 if (major * 10 + minor) >= 2 and major < 1000 and minor < 1000 else np.int32)

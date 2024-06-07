@@ -1,19 +1,12 @@
 # TinyYolo #
 
-If you like tinygrad, Pytorch and Yolo, then you'll like TinyYolo.
+If you like tiny code, Pytorch and Yolo, then you'll like TinyYolo.
 
 ## What this is ##
 
-* This repo uses the new "Tiny-Oriented-Programming" paradigm invented by [TinyGrad](https://github.com/tinygrad/tinygrad) to implement a set of popular Yolo models in (almost) pure Pytorch in under 1000 lines of code.
+* This repo uses the new "Tiny-Oriented-Programming" paradigm invented by [TinyGrad](https://github.com/tinygrad/tinygrad) to implement a set of popular Yolo models.
 
-* The goals are:
-  * Repo must be under 1000 lines of code
-  * Use pure Torch (with a sprinkle of Torchvision and [Einops](https://github.com/arogozhnikov/einops)) to implement models and loss functions
-  * Cannot sacrifice readability in favour of lines of code.
-  * However, reduce lines of code where possible
-  * Be as concise as possible
-  * Code must strive to be self-documenting
-  * No config files like Darknet .cfg or YAML for model configuration. This usually makes code less readable and less hackage.
+* No YAML files, just (hopefully) good, modular, readable, minimal yet complete code.
 
 ## What this isn't ##
 

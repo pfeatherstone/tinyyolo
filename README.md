@@ -23,7 +23,7 @@ If you like tiny code, Pytorch and Yolo, then you'll like TinyYolo.
 - [x] Yolov4-tiny
 - [x] Yolov5(n,s,m,l,x)
 - [x] Yolov7
-- [x] YOlov8(n,s,m,l,x)
+- [x] Yolov8(n,s,m,l,x)
 
 ## Observations ##
 

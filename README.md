@@ -8,17 +8,22 @@ If you like tiny code, Pytorch and Yolo, then you'll like TinyYolo.
 
 * No YAML files, just (hopefully) good, modular, readable, minimal yet complete code.
 
-## What this isn't ##
-
-* This isn't a framework. If you want a fine-tuned framework then use darknet or ultralytics
-
-* A highly optimized library (I haven't implement conv+bn fusion, or anything like that yet)
-
 ## What's provided ##
 
 * `models.py`: contains all the Yolo models, which automatically calculate loss when targets are provided in forward function.
 * `test.py`: tests the models with pretrained weights from darknet, ultralytics and Yolov7.
 * `train_coco.py`: trains on COCO using [lightning](https://lightning.ai/)
+
+## Models ##
+
+- [x] Yolov3
+- [x] Yolov3-spp
+- [x] Yolov3-tiny
+- [x] Yolov4
+- [x] Yolov4-tiny
+- [x] Yolov5(n,s,m,l,x)
+- [x] Yolov7
+- [x] YOlov8(n,s,m,l,x)
 
 ## Observations ##
 

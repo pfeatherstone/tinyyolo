@@ -15,12 +15,13 @@ def test(type: str, size: str = ''):
         case 'yolov5':      net = Yolov5(size, 80).eval()
         case 'yolov8':      net = Yolov8(size, 80).eval()
         case 'yolov7':      net = Yolov7(80).eval()
+        case 'yolov10':     net = Yolov10(size, 80).eval()
     
     print("{}{} has {} parameters".format(type, size, count_parameters(net)))
 
     has_obj = True
 
-    if type == 'yolov5' or type == 'yolov8':
+    if type in ['yolov5', 'yolov8', 'yolov10']:
         load_from_ultralytics(net)
         has_obj = False
     
@@ -54,3 +55,9 @@ test('yolov3-tiny')
 test('yolov4')
 test('yolov4-tiny')
 test('yolov7')
+test('yolov10', 'n')
+test('yolov10', 's')
+test('yolov10', 'm')
+test('yolov10', 'b')
+test('yolov10', 'l')
+test('yolov10', 'x')

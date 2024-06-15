@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
-from   einops import rearrange, repeat
+from   einops import rearrange
 
 COCO_NAMES = [
     'person',           'bicycle',      'car',          'motorbike',    'aeroplane',    
@@ -37,19 +37,30 @@ ANCHORS_V7      = ANCHORS_V4
 actV3 = nn.LeakyReLU(negative_slope=0.1, inplace=True)
 actV4 = nn.Mish(inplace=True)
 
-def get_variant_multiplesV5(variant):
-    return {'n':(0.33, 0.25, 2.0), 
-            's':(0.33, 0.50, 2.0), 
-            'm':(0.67, 0.75, 2.0), 
-            'l':(1.00, 1.00, 2.0), 
-            'x':(1.33, 1.25, 2.0) }.get(variant, None)
+def get_variant_multiplesV5(variant: str):
+    match variant:
+        case 'n': return (0.33, 0.25, 2.0)
+        case 's': return (0.33, 0.50, 2.0)
+        case 'm': return (0.67, 0.75, 2.0) 
+        case 'l': return (1.00, 1.00, 2.0) 
+        case 'x': return (1.33, 1.25, 2.0)
 
-def get_variant_multiplesV8(variant):
-    return {'n':(0.33, 0.25, 2.0), 
-            's':(0.33, 0.50, 2.0), 
-            'm':(0.67, 0.75, 1.5), 
-            'l':(1.00, 1.00, 1.0), 
-            'x':(1.00, 1.25, 1.0) }.get(variant, None)
+def get_variant_multiplesV8(variant: str):
+    match variant:
+        case 'n': return (0.33, 0.25, 2.0)
+        case 's': return (0.33, 0.50, 2.0)
+        case 'm': return (0.67, 0.75, 1.5)
+        case 'l': return (1.00, 1.00, 1.0)
+        case 'x': return (1.00, 1.25, 1.0)
+
+def get_variant_multiplesV10(variant: str):
+    match variant:
+        case 'n': return (0.33, 0.25, 2.0)
+        case 's': return (0.33, 0.50, 2.0)
+        case 'm': return (0.67, 0.75, 1.5)
+        case 'b': return (0.67, 1.00, 1.0)
+        case 'l': return (1.00, 1.00, 1.0)
+        case 'x': return (1.00, 1.25, 1.0)
 
 def batchnorms(n: nn.Module):
     for m in n.modules():
@@ -64,7 +75,14 @@ def copy_params(n1: nn.Module, n2: nn.Module):
     for m1, m2 in zip(batchnorms(n1), batchnorms(n2), strict=True):
         m1.running_mean.data.copy_(m2.running_mean.data)
         m1.running_var.data.copy_(m2.running_var.data)
+        m1.eps      = m2.eps
+        m1.momentum = m2.momentum
    
+def init_batchnorms(net: nn.Module):
+    for m in batchnorms(net):
+        m.eps = 1e-3
+        m.momentum = 0.03
+
 def count_parameters(net: torch.nn.Module, include_stats=True):
     return sum(p.numel() for p in net.parameters()) + (sum(m.running_mean.numel() + m.running_var.numel() for m in batchnorms(net)) if include_stats else 0)
         
@@ -84,8 +102,8 @@ class Residual(nn.Module):
 def Repeat(module, N):
     return nn.Sequential(*[deepcopy(module) for _ in range(N)])
 
-def Conv(c1, c2, k=1, s=1, p=None, act=nn.SiLU(True)):
-    return nn.Sequential(nn.Conv2d(c1, c2, k, s, default(p,k//2), bias=False),
+def Conv(c1, c2, k=1, s=1, p=None, g=None, act=nn.SiLU(True)):
+    return nn.Sequential(nn.Conv2d(c1, c2, k, s, default(p,k//2), groups=default(g,1), bias=False),
                          nn.BatchNorm2d(c2),
                          act)
 
@@ -99,12 +117,15 @@ def Con5(c1, c2=None, spp=False, act=actV3):
                          conv(c2//2, c2, 3),
                          conv(c2, c2//2, 1)) 
 
-def Bottleneck(c1, c2=None, k=(3, 3), shortcut=True, e=0.5, act=nn.SiLU(True)):
+def Bottleneck(c1, c2=None, k=(3, 3), shortcut=True, g=1, e=0.5, act=nn.SiLU(True)):
     c2  = default(c2, c1)
     c_  = int(c2 * e)
-    net = nn.Sequential(Conv(c1, c_, k[0], act=act), Conv(c_, c2, k[1], act=act))
+    net = nn.Sequential(Conv(c1, c_, k[0], act=act), Conv(c_, c2, k[1], g=g, act=act))
     return Residual(net) if shortcut else net
 
+def SCDown(c1, c2, k, s):
+    return nn.Sequential(Conv(c1, c2, 1, 1), Conv(c2, c2, k=k, s=s, g=c2, act=nn.Identity()))
+    
 def MaxPool(stride):
     return nn.Sequential(nn.ZeroPad2d((0,1,0,1)), nn.MaxPool2d(kernel_size=2, stride=stride))
 
@@ -121,17 +142,54 @@ class C3(nn.Module):
         return self.cv3(torch.cat((self.m(self.cv1(x)), self.cv2(x)), 1))
     
 class C2f(nn.Module):
-    def __init__(self, c1, c2, n=1, shortcut=False, e=0.5):  # ch_in, ch_out, number, shortcut, groups, expansion
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):  # ch_in, ch_out, number, shortcut, groups, expansion
         super().__init__()
         self.c   = int(c2 * e)  # hidden channels
         self.cv1 = Conv(c1, 2 * self.c, 1, 1)
         self.cv2 = Conv((2 + n) * self.c, c2, 1)  # optional act=FReLU(c2)
-        self.m   = nn.ModuleList(Bottleneck(self.c, k=(3, 3), e=1.0, shortcut=shortcut) for _ in range(n))
+        self.m   = nn.ModuleList(Bottleneck(self.c, k=(3, 3), e=1.0, g=g, shortcut=shortcut) for _ in range(n))
 
     def forward(self, x):
         y = list(self.cv1(x).chunk(2, 1))
         y.extend(m(y[-1]) for m in self.m)
         return self.cv2(torch.cat(y, 1))
+
+class RepVGGDW(torch.nn.Module):
+    def __init__(self, ed):
+        super().__init__()
+        self.conv   = Conv(ed, ed, 7, 1, 3, g=ed, act=nn.Identity())
+        self.conv1  = Conv(ed, ed, 3, 1, 1, g=ed, act=nn.Identity())
+        self.dim    = ed
+        self.act    = nn.SiLU()
+    
+    def forward(self, x):
+        return self.act(self.conv(x) + self.conv1(x))
+
+class CIB(nn.Module):
+    def __init__(self, c1, c2, shortcut=True, e=0.5, lk=False):
+        super().__init__()
+        c_ = int(c2 * e)  # hidden channels
+        self.cv1 = nn.Sequential(
+            Conv(c1, c1, 3, g=c1),
+            Conv(c1, 2 * c_, 1),
+            Conv(2 * c_, 2 * c_, 3, g=2 * c_) if not lk else RepVGGDW(2 * c_),
+            Conv(2 * c_, c2, 1),
+            Conv(c2, c2, 3, g=c2),
+        )
+
+        self.add = shortcut and c1 == c2
+
+    def forward(self, x):
+        """'forward()' applies the YOLO FPN to input data."""
+        return x + self.cv1(x) if self.add else self.cv1(x)
+    
+class C2fCIB(C2f):
+    def __init__(self, c1, c2, n=1, shortcut=False, lk=False, g=1, e=0.5):
+        """Initialize CSP bottleneck layer with two convolutions with arguments ch_in, ch_out, number, shortcut, groups,
+        expansion.
+        """
+        super().__init__(c1, c2, n, shortcut, g, e)
+        self.m = nn.ModuleList(CIB(self.c, self.c, shortcut, e=1.0, lk=lk) for _ in range(n))
 
 class Spp(nn.Module):
     def __init__(self, inc, act):
@@ -177,6 +235,45 @@ class SPPCSPC(nn.Module):
         y2 = self.cv2(x)
         return self.cv7(torch.cat((y1, y2), dim=1))
 
+class Attention(nn.Module):
+    def __init__(self, dim, num_heads=8, attn_ratio=0.5):
+        super().__init__()
+        self.num_heads  = num_heads
+        self.dim_head   = dim // num_heads
+        self.key_dim    = int(self.dim_head * attn_ratio)
+        h               = (self.dim_head + self.key_dim*2) * num_heads
+        self.qkv        = Conv(dim, h, 1, act=nn.Identity())
+        self.proj       = Conv(dim, dim, 1, act=nn.Identity())
+        self.pe         = Conv(dim, dim, 3, 1, g=dim, act=nn.Identity())
+
+    def forward(self, x):
+        H, W    = x.shape[-2:]
+        q, k, v = rearrange(self.qkv(x), 'b (h d) y x -> b h (y x) d', h=self.num_heads).split([self.key_dim, self.key_dim, self.dim_head], -1)
+        x       = F.scaled_dot_product_attention(q, k, v)
+        x, v    = map(lambda t: rearrange(t, 'b h (y x) d -> b (h d) y x', y=H, x=W), (x, v))
+        x       = self.proj(x + self.pe(v))
+        return x
+
+class PSA(nn.Module):
+    def __init__(self, c1, c2, e=0.5):
+        super().__init__()
+        assert(c1 == c2)
+        self.c = int(c1 * e)
+        self.cv1 = Conv(c1, 2 * self.c, 1, 1)
+        self.cv2 = Conv(2 * self.c, c1, 1)
+        
+        self.attn = Attention(self.c, attn_ratio=0.5, num_heads=self.c // 64)
+        self.ffn = nn.Sequential(
+            Conv(self.c, self.c*2, 1),
+            Conv(self.c*2, self.c, 1, act=nn.Identity())
+        )
+        
+    def forward(self, x):
+        a, b = self.cv1(x).split((self.c, self.c), dim=1)
+        b = b + self.attn(b)
+        b = b + self.ffn(b)
+        return self.cv2(torch.cat((a, b), 1))
+    
 class Darknet53(nn.Module):
     def __init__(self):
         super().__init__()
@@ -374,6 +471,32 @@ class BackboneV8(nn.Module):
         x9 = self.b9(self.b8(self.b7(x6)))                  # 9 P5/32
         return x4, x6, x9
 
+class BackboneV10(nn.Module):
+    def __init__(self, w, r, d, variant):
+        super().__init__()
+        self.b0 = Conv(c1=3, c2= int(64*w), k=3, s=2)
+        self.b1 = Conv(int(64*w), int(128*w), k=3, s=2)
+        self.b2 = C2f(c1=int(128*w), c2=int(128*w), n=round(3*d), shortcut=True)
+        self.b3 = Conv(int(128*w), int(256*w), k=3, s=2)
+        self.b4 = C2f(c1=int(256*w), c2=int(256*w), n=round(6*d), shortcut=True)
+        self.b5 = SCDown(int(256*w), int(512*w), k=3, s=2)
+        match variant:
+            case 'x': self.b6 = C2fCIB(c1=int(512*w), c2=int(512*w), n=round(6*d), shortcut=True)
+            case _  : self.b6 = C2f(c1=int(512*w), c2=int(512*w), n=round(6*d), shortcut=True)
+        self.b7 = SCDown(int(512*w), int(512*w*r), k=3, s=2)
+        match variant:
+            case 'n': self.b8 = C2f(c1=int(512*w*r), c2=int(512*w*r), n=round(3*d), shortcut=True)
+            case 's': self.b8 = C2fCIB(c1=int(512*w*r), c2=int(512*w*r), n=round(3*d), shortcut=True, lk=True)
+            case _  : self.b8 = C2fCIB(c1=int(512*w*r), c2=int(512*w*r), n=round(3*d), shortcut=True, lk=False)
+        self.b9 = SPPF(int(512*w*r), int(512*w*r))
+        self.b10 = PSA(int(512*w*r), int(512*w*r))
+
+    def forward(self, x):
+        x4  = self.b4(self.b3(self.b2(self.b1(self.b0(x))))) # 4  P3/8
+        x6  = self.b6(self.b5(x4))                           # 6  P4/16
+        x10 = self.b10(self.b9(self.b8(self.b7(x6))))        # 10 P5/32
+        return x4, x6, x10
+
 class HeadV3(nn.Module):
     def __init__(self, spp):
         super().__init__() 
@@ -468,7 +591,7 @@ class HeadV5(nn.Module):
         return [x17, x20, x23]
 
 class HeadV8(nn.Module):
-    def __init__(self, w, r, d):  #width_multiple, ratio_multiple, depth_multiple
+    def __init__(self, w, r, d):
         super().__init__()
         self.up = nn.Upsample(scale_factor=2)
         self.n1 = C2f(c1=int(512*w*(1+r)), c2=int(512*w), n=round(3*d))
@@ -485,6 +608,30 @@ class HeadV8(nn.Module):
         x21 = self.n6(torch.cat([self.n5(x18), x9], 1)) # 21 (P5/32-large)
         return [x15, x18, x21]
 
+class HeadV10(nn.Module):
+    def __init__(self, w, r, d, variant):
+        super().__init__()
+        self.up = nn.Upsample(scale_factor=2)
+        match variant:
+            case 'n'|'s'|'m': self.n1 = C2f(c1=int(512*w*(1+r)), c2=int(512*w), n=round(3*d))
+            case _          : self.n1 = C2fCIB(c1=int(512*w*(1+r)), c2=int(512*w), n=round(3*d), shortcut=True)
+        self.n2 = C2f(c1=int(768*w), c2=int(256*w), n=round(3*d))
+        self.n3 = Conv(c1=int(256*w), c2=int(256*w), k=3, s=2)
+        match variant:
+            case 'n'|'s': self.n4 = C2f(c1=int(768*w), c2=int(512*w), n=round(3*d))
+            case _      : self.n4 = C2fCIB(c1=int(768*w), c2=int(512*w), n=round(3*d), shortcut=True)
+        self.n5 = SCDown(c1=int(512* w), c2=int(512 * w), k=3, s=2)
+        match variant:
+            case 'n'|'s': self.n6 = C2fCIB(c1=int(512*w*(1+r)), c2=int(512*w*r), n=round(3*d), shortcut=True, lk=True)
+            case _      : self.n6 = C2fCIB(c1=int(512*w*(1+r)), c2=int(512*w*r), n=round(3*d), shortcut=True, lk=False)
+
+    def forward(self, x4, x6, x10):
+        x13 = self.n1(torch.cat([self.up(x10),x6], 1))  # 13
+        x16 = self.n2(torch.cat([self.up(x13),x4], 1))  # 16 (P3/8-small)
+        x19 = self.n4(torch.cat([self.n3(x16),x13], 1)) # 19 (P4/16-medium)
+        x22 = self.n6(torch.cat([self.n5(x19),x10], 1)) # 22 (P5/32-large)
+        return [x16, x19, x22]
+
 def make_anchors(feats, strides, grid_cell_offset=0.5):
     sxy             = []
     strides_tensor  = []
@@ -498,25 +645,22 @@ def make_anchors(feats, strides, grid_cell_offset=0.5):
     return torch.cat(sxy, 1), torch.cat(strides_tensor)
 
 class Detect(nn.Module):
-    """YOLOv8 Detect head for detection models."""
     def __init__(self, nc=80, ch=()):
         super().__init__()
         self.nc         = nc                        # number of classes
         self.reg_max    = 16                        # DFL channels (ch[0] // 16 to scale 4/8/12/16/20 for n/s/m/l/x)
         self.no         = nc + self.reg_max * 4     # number of outputs per anchor
         self.strides    = [8, 16, 32]               # strides computed during build
-        c2, c3          = max((16, ch[0] // 4, self.reg_max * 4)), max(ch[0], min(self.nc, 100))  # channels
-        self.cv2        = nn.ModuleList(nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1)) for x in ch)
-        self.cv3        = nn.ModuleList(nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.nc, 1)) for x in ch)
+        self.c2         = max((16, ch[0] // 4, self.reg_max * 4))
+        self.c3         = max(ch[0], min(self.nc, 100))  # channels
+        self.cv2        = nn.ModuleList(nn.Sequential(Conv(x, self.c2, 3), Conv(self.c2, self.c2, 3), nn.Conv2d(self.c2, 4 * self.reg_max, 1)) for x in ch)
+        self.cv3        = nn.ModuleList(nn.Sequential(Conv(x, self.c3, 3), Conv(self.c3, self.c3, 3), nn.Conv2d(self.c3, self.nc, 1)) for x in ch)
         self.r          = nn.Parameter(torch.arange(self.reg_max).float(), requires_grad=False)
 
-    def forward(self, x, labels=None):
-        for i in range(len(x)):
-            x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), 1)
+    def forward_feat(self, x, cv2, cv3):
+        return [torch.cat((c1(xi), c2(xi)), 1) for xi,c1,c2 in zip(x,cv2,cv3)]
 
-        if exists(labels):
-            return x
-        
+    def inference(self, x):
         sxy, strides = make_anchors(x, self.strides)
         x            = torch.cat([xi.flatten(2) for xi in x], 2)
         dist, cls    = x.split((4 * self.reg_max, self.nc), 1)
@@ -528,6 +672,39 @@ class Detect(nn.Module):
         box          = torch.cat([x1y1,x2y2],1) * strides
         preds        = torch.cat((box, cls.sigmoid()), 1)
         return preds.transpose(1,2)
+    
+    def forward(self, x):
+        return self.inference(self.forward_feat(x, self.cv2, self.cv3))
+        
+class DetectV10(Detect):
+    def __init__(self, nc=80, ch=()):
+        super().__init__(nc, ch)
+        self.cv3 = nn.ModuleList(nn.Sequential(Conv(x, x, 3, g=x), 
+                                               Conv(x, self.c3, 1),
+                                               Conv(self.c3, self.c3, 3, g=self.c3), 
+                                               Conv(self.c3, self.c3, 1),
+                                               nn.Conv2d(self.c3, self.nc, 1)) for x in ch)
+
+        self.one2one_cv2 = deepcopy(self.cv2)
+        self.one2one_cv3 = deepcopy(self.cv3)
+        self.max_det = 100
+    
+    def forward(self, x):
+        # one2many = super().forward(x)
+        preds = self.inference(self.forward_feat(x, self.one2one_cv2, self.one2one_cv3))
+        return preds
+        # boxes, scores       = preds.split([4, self.nc], dim=-1)
+        # max_scores          = scores.amax(dim=-1)
+        # max_scores, index   = torch.topk(max_scores, self.max_det, dim=-1)
+        # index               = index.unsqueeze(-1)
+        # boxes               = torch.gather(boxes, dim=1, index=index.repeat(1, 1, boxes.shape[-1]))
+        # scores              = torch.gather(scores, dim=1, index=index.repeat(1, 1, scores.shape[-1]))
+
+        # scores, index       = torch.topk(scores.flatten(1), self.max_det, dim=-1)
+        # labels              = index % self.nc
+        # index               = index // self.nc
+        # boxes               = boxes.gather(dim=1, index=index.unsqueeze(-1).repeat(1, 1, boxes.shape[-1]))
+        # return torch.cat([boxes, scores.unsqueeze(-1), labels.unsqueeze(-1).to(boxes.dtype)], dim=-1)
 
 @nb.njit
 def build_targets_v3(B: int, H: int, W: int, C: int, stride: int, anchors: np.ndarray, targets: np.ndarray):
@@ -713,10 +890,10 @@ class Yolov5(nn.Module):
         self.fpn  = HeadV5(w, r, d)
         self.head = Detect(num_classes, ch=(int(256*w), int(512*w), int(512*w*2)))
 
-    def forward(self, x, labels=None):
+    def forward(self, x):
         x = self.net(x)
         x = self.fpn(*x)
-        return self.head(x, labels=labels)
+        return self.head(x)
 
 class Yolov8(nn.Module):
     def __init__(self, variant, num_classes):
@@ -727,14 +904,27 @@ class Yolov8(nn.Module):
         self.fpn  = HeadV8(w, r, d)
         self.head = Detect(num_classes, ch=(int(256*w), int(512*w), int(512*w*r)))
 
-    def forward(self, x, labels=None):
+    def forward(self, x):
         x = self.net(x)
         x = self.fpn(*x)
-        return self.head(x, labels=labels)
+        return self.head(x)
 
-def load_from_ultralytics(net: Union[Yolov5, Yolov8]):
+class Yolov10(nn.Module):
+    def __init__(self, variant, num_classes):
+        super().__init__()
+        self.v    = variant
+        d, w, r   = get_variant_multiplesV10(variant)
+        self.net  = BackboneV10(w, r, d, variant)
+        self.fpn  = HeadV10(w, r, d, variant)
+        self.head = DetectV10(num_classes, ch=(int(256*w), int(512*w), int(512*w*r)))
+
+    def forward(self, x):
+        x = self.net(x)
+        x = self.fpn(*x)
+        return self.head(x)
+
+def load_from_ultralytics(net: Union[Yolov5, Yolov8, Yolov10]):
     from ultralytics import YOLO
-    import numpy as np
 
     if isinstance(net, Yolov5):
         net2 = YOLO('yolov5{}u.pt'.format(net.v)).model.eval()
@@ -751,8 +941,18 @@ def load_from_ultralytics(net: Union[Yolov5, Yolov8]):
         copy_params(net.fpn, net2.model[10:22])
         copy_params(net.head.cv2, net2.model[22].cv2)
         copy_params(net.head.cv3, net2.model[22].cv3)
-
-def load_darknet(net, weights_path: str):
+    
+    elif isinstance(net, Yolov10):
+        net2 = YOLO('yolov10{}.pt'.format(net.v)).model.eval()
+        assert (nP1 := count_parameters(net)) == (nP2 := count_parameters(net2)), 'wrong number of parameters net {} vs ultralytics {}'.format(nP1, nP2)
+        copy_params(net.net, net2.model[0:11])
+        copy_params(net.fpn, net2.model[11:23])
+        copy_params(net.head.cv2, net2.model[23].cv2)
+        copy_params(net.head.cv3, net2.model[23].cv3)
+        copy_params(net.head.one2one_cv2, net2.model[23].one2one_cv2)
+        copy_params(net.head.one2one_cv3, net2.model[23].one2one_cv3)
+    
+def load_darknet(net: Union[Yolov3, Yolov3Tiny, Yolov4, Yolov4Tiny], weights_path: str):
     with open(weights_path, "rb") as f:
         major, minor, _ = np.fromfile(f, dtype=np.int32, count=3)
         steps = np.fromfile(f, count=1, dtype=np.int64 if (major * 10 + minor) >= 2 and major < 1000 and minor < 1000 else np.int32)
@@ -790,10 +990,7 @@ def load_yolov7(net: Yolov7, weights_pt: str):
     for p1, p2 in zip(state1.values(), state2.values(), strict=True):
         p1.data.copy_(p2.data)
 
-    for m in net.modules():
-        if isinstance(m, nn.BatchNorm2d):
-            m.eps = 1e-3
-            m.momentum = 0.03
+    init_batchnorms(net)
 
 @torch.no_grad()
 def nms(preds: torch.Tensor, conf_thresh: float, nms_thresh: float , has_objectness: bool):

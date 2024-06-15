@@ -24,7 +24,8 @@ If you like tiny code, Pytorch and Yolo, then you'll like TinyYolo.
 - [x] Yolov5(n,s,m,l,x)
 - [x] Yolov7
 - [x] Yolov8(n,s,m,l,x)
+- [x] Yolov10(n,s,m,b,l,x)
 
 ## Observations ##
 
-* Yolov7 uses `eps=0.001` and `momentum=0.03` in `nn.Batchnorm2d`. That's unusual. I wonder what effects that has on training.
+* All the ultralytics models and Yolov7 use `eps=0.001` and `momentum=0.03` in `nn.Batchnorm2d`. That's unusual. I wonder what effects that has on training.

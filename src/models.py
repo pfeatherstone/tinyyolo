@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
-from   einops import rearrange
+from   einops import rearrange, repeat
 
 COCO_NAMES = [
     'person',           'bicycle',      'car',          'motorbike',    'aeroplane',    
@@ -132,7 +132,7 @@ def MaxPool(stride):
 class C3(nn.Module):
     def __init__(self, c1, c2, n=1, shortcut=True, e=0.5):
         super().__init__()
-        c_ = int(c2 * e)  # hidden channels
+        c_       = int(c2 * e)  # hidden channels
         self.cv1 = Conv(c1, c_, 1, 1)
         self.cv2 = Conv(c1, c_, 1, 1)
         self.cv3 = Conv(2 * c_, c2, 1)  # optional act=FReLU(c2)f
@@ -144,52 +144,67 @@ class C3(nn.Module):
 class C2f(nn.Module):
     def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):  # ch_in, ch_out, number, shortcut, groups, expansion
         super().__init__()
-        self.c   = int(c2 * e)  # hidden channels
-        self.cv1 = Conv(c1, 2 * self.c, 1, 1)
-        self.cv2 = Conv((2 + n) * self.c, c2, 1)  # optional act=FReLU(c2)
-        self.m   = nn.ModuleList(Bottleneck(self.c, k=(3, 3), e=1.0, g=g, shortcut=shortcut) for _ in range(n))
+        self.c_  = int(c2 * e)  # hidden channels
+        self.cv1 = Conv(c1, 2 * self.c_, 1, 1)
+        self.cv2 = Conv((2 + n) * self.c_, c2, 1)  # optional act=FReLU(c2)
+        self.m   = nn.ModuleList(Bottleneck(self.c_, k=(3, 3), e=1.0, g=g, shortcut=shortcut) for _ in range(n))
 
     def forward(self, x):
         y = list(self.cv1(x).chunk(2, 1))
         y.extend(m(y[-1]) for m in self.m)
         return self.cv2(torch.cat(y, 1))
 
+class CspBlock(nn.Module):
+    def __init__(self, c1, c2, f=1, e=1, act=actV3, n=1):
+        super().__init__()
+        conv    = partial(Conv, act=act)
+        c_      = int(c2 * f)  # hidden channels
+        self.d  = conv(c1, c_, 3, s=2)
+        self.c1 = conv(c_, c2, 1)
+        self.c2 = conv(c_, c2, 1)
+        self.m  = Repeat(Bottleneck(c2, e=e, k=(1,3), act=act), n)
+        self.c3 = conv(c2, c2, 1)
+        self.c4 = conv(2*c2, c_, 1)
+    def forward(self, x):
+        x = self.d(x)
+        a = self.c1(x)
+        b = self.c3(self.m(self.c2(x)))
+        x = self.c4(torch.cat([b, a], 1))
+        return x
+    
 class RepVGGDW(torch.nn.Module):
     def __init__(self, ed):
         super().__init__()
-        self.conv   = Conv(ed, ed, 7, 1, 3, g=ed, act=nn.Identity())
-        self.conv1  = Conv(ed, ed, 3, 1, 1, g=ed, act=nn.Identity())
+        self.conv   = Conv(ed, ed, 7, g=ed, act=nn.Identity())
+        self.conv1  = Conv(ed, ed, 3, g=ed, act=nn.Identity())
         self.dim    = ed
-        self.act    = nn.SiLU()
     
     def forward(self, x):
-        return self.act(self.conv(x) + self.conv1(x))
+        return F.silu(self.conv(x) + self.conv1(x), inplace=True)
 
-class CIB(nn.Module):
-    def __init__(self, c1, c2, shortcut=True, e=0.5, lk=False):
+class RepConv(nn.Module):
+    def __init__(self, c1, c2):
         super().__init__()
-        c_ = int(c2 * e)  # hidden channels
-        self.cv1 = nn.Sequential(
-            Conv(c1, c1, 3, g=c1),
-            Conv(c1, 2 * c_, 1),
-            Conv(2 * c_, 2 * c_, 3, g=2 * c_) if not lk else RepVGGDW(2 * c_),
-            Conv(2 * c_, c2, 1),
-            Conv(c2, c2, 3, g=c2),
-        )
-
-        self.add = shortcut and c1 == c2
-
+        self.c1 = Conv(c1, c2, 3, act=nn.Identity())
+        self.c2 = Conv(c1, c2, 1, act=nn.Identity())
+        self.bn = nn.BatchNorm2d(c1) if c1==c2 else None
     def forward(self, x):
-        """'forward()' applies the YOLO FPN to input data."""
-        return x + self.cv1(x) if self.add else self.cv1(x)
+        id_out = self.bn(x) if exists(self.bn) else 0
+        return F.silu(self.c1(x) + self.c2(x) + id_out, inplace=True)
+
+def CIB(c1, c2, shortcut=True, e=0.5, lk=False):
+    c_  = int(c2 * e)  # hidden channels
+    net = nn.Sequential(Conv(c1, c1, 3, g=c1),
+                        Conv(c1, 2 * c_, 1),
+                        Conv(2 * c_, 2 * c_, 3, g=2 * c_) if not lk else RepVGGDW(2 * c_),
+                        Conv(2 * c_, c2, 1),
+                        Conv(c2, c2, 3, g=c2))
+    return Residual(net) if shortcut else net
     
-class C2fCIB(C2f):
-    def __init__(self, c1, c2, n=1, shortcut=False, lk=False, g=1, e=0.5):
-        """Initialize CSP bottleneck layer with two convolutions with arguments ch_in, ch_out, number, shortcut, groups,
-        expansion.
-        """
-        super().__init__(c1, c2, n, shortcut, g, e)
-        self.m = nn.ModuleList(CIB(self.c, self.c, shortcut, e=1.0, lk=lk) for _ in range(n))
+def C2fCIB(c1, c2, n=1, shortcut=False, lk=False, g=1, e=0.5):
+    net   = C2f(c1, c2, n, shortcut, g, e)
+    net.m = nn.ModuleList(CIB(net.c_, net.c_, shortcut, e=1.0, lk=lk) for _ in range(n))
+    return net
 
 class Spp(nn.Module):
     def __init__(self, inc, act):
@@ -258,22 +273,16 @@ class PSA(nn.Module):
     def __init__(self, c1, c2, e=0.5):
         super().__init__()
         assert(c1 == c2)
-        self.c = int(c1 * e)
-        self.cv1 = Conv(c1, 2 * self.c, 1, 1)
-        self.cv2 = Conv(2 * self.c, c1, 1)
-        
-        self.attn = Attention(self.c, attn_ratio=0.5, num_heads=self.c // 64)
-        self.ffn = nn.Sequential(
-            Conv(self.c, self.c*2, 1),
-            Conv(self.c*2, self.c, 1, act=nn.Identity())
-        )
+        c_       = int(c2 * e)  # hidden channels
+        self.cv1 = Conv(c1, 2 * c_, 1)
+        self.cv2 = Conv(2 * c_, c1, 1)
+        self.net = nn.Sequential(Residual(Attention(c_, attn_ratio=0.5, num_heads=c_ // 64)),
+                                 Residual(nn.Sequential(Conv(c_, c_*2, 1), Conv(c_*2, c_, 1, act=nn.Identity()))))
         
     def forward(self, x):
-        a, b = self.cv1(x).split((self.c, self.c), dim=1)
-        b = b + self.attn(b)
-        b = b + self.ffn(b)
-        return self.cv2(torch.cat((a, b), 1))
-    
+        a, b = self.cv1(x).chunk(2, 1)
+        return self.cv2(torch.cat((a, self.net(b)), 1))
+
 class Darknet53(nn.Module):
     def __init__(self):
         super().__init__()
@@ -305,25 +314,6 @@ class BackboneV3Tiny(nn.Module):
         x16 = self.b1(x)
         x32 = self.b2(x16)
         return x16, x32
-
-class CspBlock(nn.Module):
-    def __init__(self, c1, c2, f=1, e=1, act=actV3, n=1):
-        super().__init__()
-        conv = partial(Conv, act=act)
-        c_   = int(c2*f)
-        self.d  = conv(c1, c_, 3, s=2)
-        self.c1 = conv(c_, c2, 1)
-        self.c2 = conv(c_, c2, 1)
-        self.m  = Repeat(Bottleneck(c2, e=e, k=(1,3), act=act), n)
-        self.c3 = conv(c2, c2, 1)
-        self.c4 = conv(2*c2, c_, 1)
-    def forward(self, x):
-        x = self.d(x)
-        a = self.c1(x)
-        b = self.c3(self.m(self.c2(x)))
-        x = torch.cat([b, a], 1)
-        x = self.c4(x)
-        return x
 
 class BackboneV4(nn.Module):
     def __init__(self, act):
@@ -398,16 +388,6 @@ class MaxPoolAndStrideConv(nn.Module):
         self.b2 = nn.Sequential(Conv(cin, cmid, 1), Conv(cmid, cout//2, 3, s=2))
     def forward(self, x):
         return torch.cat([self.b2(x), self.b1(x)], 1)
-    
-class RepConv(nn.Module):
-    def __init__(self, c1, c2):
-        super().__init__()
-        self.c1 = Conv(c1, c2, 3, act=nn.Identity())
-        self.c2 = Conv(c1, c2, 1, act=nn.Identity())
-        self.bn = nn.BatchNorm2d(c1) if c1==c2 else None
-    def forward(self, x):
-        id_out = self.bn(x) if exists(self.bn) else 0
-        return F.silu(self.c1(x) + self.c2(x) + id_out, inplace=True)
     
 class Scale(nn.Module):
     def __init__(self, c, add: bool):
@@ -690,21 +670,8 @@ class DetectV10(Detect):
         self.max_det = 100
     
     def forward(self, x):
-        # one2many = super().forward(x)
-        preds = self.inference(self.forward_feat(x, self.one2one_cv2, self.one2one_cv3))
-        return preds
-        # boxes, scores       = preds.split([4, self.nc], dim=-1)
-        # max_scores          = scores.amax(dim=-1)
-        # max_scores, index   = torch.topk(max_scores, self.max_det, dim=-1)
-        # index               = index.unsqueeze(-1)
-        # boxes               = torch.gather(boxes, dim=1, index=index.repeat(1, 1, boxes.shape[-1]))
-        # scores              = torch.gather(scores, dim=1, index=index.repeat(1, 1, scores.shape[-1]))
-
-        # scores, index       = torch.topk(scores.flatten(1), self.max_det, dim=-1)
-        # labels              = index % self.nc
-        # index               = index // self.nc
-        # boxes               = boxes.gather(dim=1, index=index.unsqueeze(-1).repeat(1, 1, boxes.shape[-1]))
-        # return torch.cat([boxes, scores.unsqueeze(-1), labels.unsqueeze(-1).to(boxes.dtype)], dim=-1)
+        # TODO: implement all the topk stuff. I think yolov10 doesn't need NMS. But you can you use it in inference mode for now.
+        return self.inference(self.forward_feat(x, self.one2one_cv2, self.one2one_cv3))
 
 @nb.njit
 def build_targets_v3(B: int, H: int, W: int, C: int, stride: int, anchors: np.ndarray, targets: np.ndarray):
@@ -737,49 +704,70 @@ def build_targets_v3(B: int, H: int, W: int, C: int, stride: int, anchors: np.nd
     return target_tensor[...,:-1]
 
 class DetectV3(nn.Module):
-    def __init__(self, nclasses, strides, anchors, scales, is_v7=False):
+    def __init__(self, nc, strides, anchors, scales, ch, is_v7=False):
         super().__init__()
-        self.register_buffer('anchors', torch.tensor(anchors).float())
+        self.register_buffer('anchors_wh', torch.tensor(anchors).float())
+        conv            = RepConv if is_v7 else partial(Conv, k=3, act=actV3)
+        self.cv         = nn.ModuleList([nn.Sequential(conv(c1, c2), nn.Conv2d(c2, (nc+5)*3, 1)) for c1, c2 in ch])
+        self.nc         = nc
         self.strides    = strides
-        self.C          = nclasses
         self.scales     = scales
         self.v7         = is_v7
 
     @torch.no_grad()
-    def make_grid(self, x):
-        h, w    = x.shape[2], x.shape[3]
-        sx      = torch.arange(end=w, device=x.device)
-        sy      = torch.arange(end=h, device=x.device)
+    def make_anchors(self, x, awh):
+        a, h, w = awh.shape[0], x.shape[2], x.shape[3]
+        sx      = torch.arange(end=w, device=x.device) + 0.5
+        sy      = torch.arange(end=h, device=x.device) + 0.5
         sy, sx  = torch.meshgrid(sy, sx, indexing='ij')
-        sxy     = torch.stack([sx,sy],-1)
-        return sxy
+        xy      = repeat([sx,sy], 'c h w -> (a h w) c', a=a)
+        awh     = repeat(awh, 'a c -> (a h w) c', h=h, w=w)
+        return xy, awh
 
-    def to_xy(self, xy, scale, S):
-        sxy = self.make_grid(xy)
+    def to_wh(self, wh, awh):
         match self.v7:
-            case True:  return S * (xy.sigmoid() * 2 - 0.5 + sxy)
-            case False: return S * ((xy.sigmoid() - 0.5) * scale + 0.5 + sxy)
-
-    def to_wh(self, wh, A):
-        match self.v7:
-            case True:  return A.view(1,-1,1,1,2) * (wh.sigmoid() ** 2) * 4
-            case False: return A.view(1,-1,1,1,2) * wh.exp()
+            case True:  return awh * (wh.sigmoid() ** 2) * 4
+            case False: return awh * wh.exp()
     
-    def forward(self, *xs, targets=None):
+    def forward(self, xs, targets=None):
+        xs = [n(x) for n, x in zip(self.cv, xs)]
+
+        preds = []
+        for x, awh, stride, scale in zip(xs, self.anchors_wh, self.strides, self.scales):
+            sxy, awh        = self.make_anchors(x, awh)
+            xy, wh, l, cls  = rearrange(x, 'b (a f) h w -> b (a h w) f', f=self.nc+5).split((2,2,1,self.nc), -1) 
+            xy              = stride * ((xy.sigmoid() - 0.5) * scale + sxy)
+            wh              = self.to_wh(wh, awh)
+            box             = torch.cat([xy-wh/2, xy+wh/2], -1)
+            pred            = torch.cat([box, l.sigmoid(), cls.sigmoid()], -1)
+            preds.append(pred)
+        
+        return torch.cat(preds, 1)
+
+        anchors, strides, scales = self.make_anchors(x)
+        anchors, strides, scales = map(lambda v: torch.cat(v, 0), (anchors, strides, scales))
+        dets            = torch.cat([rearrange(xi, 'b (a f) h w -> b (a h w) f', f=self.nc+5) for xi in x], 1)
+        xy, wh, l, cls  = dets.split((2,2,1,self.nc), -1)
+        xy              = self.to_xy(xy, anchors[:,:2], scales, strides)
+        wh              = self.to_wh(wh, anchors[:,2:])
+        box             = torch.cat([xy-wh/2, xy+wh/2], -1)
+        pred            = torch.cat([box, l.sigmoid(), cls.sigmoid()], -1)
+        return pred
+
         preds       = []
         loss_iou    = 0
         loss_cls    = 0
         loss_obj    = 0
         loss_noobj  = 0
 
-        for x, stride, anchor, scale in zip(xs, self.strides, self.anchors, self.scales):
-            dets            = rearrange(x, 'b (a f) h w -> b a h w f', f=self.C+5)
+        for x, stride, awh, scale in zip(xs, self.strides, self.anchors_wh, self.scales):
+            anchors         = self.make_anchors(x, awh)
+            dets            = rearrange(x, 'b (a f) h w -> b (a h w) f', f=self.C+5)
             xy, wh, l, cls  = dets.split((2,2,1,self.C), -1)
-            xy              = self.to_xy(xy, scale, stride)
-            wh              = self.to_wh(wh, anchor)
+            xy              = self.to_xy(xy, anchors[:,:2], scale, stride)
+            wh              = self.to_wh(wh, anchors[:,2:])
             box             = torch.cat([xy-wh/2, xy+wh/2], -1)
             pred            = torch.cat([box, l.sigmoid(), cls.sigmoid()], -1)
-            pred            = rearrange(pred, 'b a h w f -> b (a h w) f')
             preds.append(pred)
 
             if exists(targets):
@@ -800,86 +788,83 @@ class DetectV3(nn.Module):
 class Yolov3(nn.Module):
     def __init__(self, nclasses, spp):
         super().__init__()
-        self.back = Darknet53()
-        self.head = HeadV3(spp)
-        self.neck = nn.ModuleList([nn.Sequential(Conv(c1, c2, 3, act=actV3), nn.Conv2d(c2, (nclasses+5)*3, 1)) for c1, c2 in [(128, 256), (256, 512), (512, 1024)]])
-        self.yolo = DetectV3(nclasses, [8,16,32], ANCHORS_V3, [1,1,1])
+        self.net  = Darknet53()
+        self.fpn  = HeadV3(spp)
+        self.head = DetectV3(nclasses, [8,16,32], ANCHORS_V3, [1,1,1], ch=[(128, 256), (256, 512), (512, 1024)])
 
     def layers(self):
-        return [self.back,    self.head.b1, self.neck[2], 
-                self.head.c1, self.head.b2, self.neck[1], 
-                self.head.c2, self.head.b3, self.neck[0]]
+        return [self.net,    self.fpn.b1, self.head.cv[2], 
+                self.fpn.c1, self.fpn.b2, self.head.cv[1], 
+                self.fpn.c2, self.fpn.b3, self.head.cv[0]]
     
     def forward(self, x, targets=None):
-        p8, p16, p32 = self.head(*self.back(x))
-        p8, p16, p32 = map(lambda x, n: n(x), [p8, p16, p32], self.neck)
-        return self.yolo(p8, p16, p32, targets=targets)
+        x = self.net(x)
+        x = self.fpn(*x)
+        return self.head(x, targets=targets)
     
 class Yolov3Tiny(nn.Module):
     def __init__(self, nclasses):
         super().__init__()
-        self.back = BackboneV3Tiny()
-        self.head = HeadV3Tiny(1024)
-        self.neck = nn.ModuleList([nn.Sequential(Conv(c1, c2, 3, act=actV3), nn.Conv2d(c2, (nclasses+5)*3, 1)) for c1, c2 in [(384, 256), (256, 512)]])
-        self.yolo = DetectV3(nclasses, [16,32], ANCHORS_V3_TINY, [1,1])
+        self.net  = BackboneV3Tiny()
+        self.fpn  = HeadV3Tiny(1024)
+        self.head = DetectV3(nclasses, [16,32], ANCHORS_V3_TINY, [1,1], ch=[(384, 256), (256, 512)])
 
     def layers(self):
-        return [self.back, self.head.b1, self.neck[1], self.head.c2, self.neck[0]]
+        return [self.net, self.fpn.b1, self.head.cv[1], self.fpn.c2, self.head.cv[0]]
     
     def forward(self, x, targets=None):
-        p16, p32 = self.head(*self.back(x))
-        p16, p32 = map(lambda x, n: n(x), [p16, p32], self.neck)
-        return self.yolo(p16, p32, targets=targets)
+        x = self.net(x)
+        x = self.fpn(*x)
+        return self.head(x, targets=targets)
     
 class Yolov4(nn.Module):
     def __init__(self, nclasses, act=actV4):
         super().__init__()
-        self.back = BackboneV4(act)
-        self.head = HeadV4(actV3)
-        self.neck = nn.ModuleList([nn.Sequential(Conv(c1, c2, 3, act=actV3), nn.Conv2d(c2, (nclasses+5)*3, 1))  for c1, c2 in [(128, 256), (256, 512), (512, 1024)]])
-        self.yolo = DetectV3(nclasses, [8,16,32], ANCHORS_V4, [1.2, 1.1, 1.05])
+        self.net  = BackboneV4(act)
+        self.fpn  = HeadV4(actV3)
+        self.head = DetectV3(nclasses, [8,16,32], ANCHORS_V4, [1.2, 1.1, 1.05], ch=[(128, 256), (256, 512), (512, 1024)])
 
     def layers(self):
-        return [self.back, self.head.b1, self.head.c1, self.head.b2, 
-                self.head.c2, self.head.b3, self.neck[0],
-                self.head.c3, self.head.b4, self.neck[1],
-                self.head.c4, self.head.b5, self.neck[2]]
+        return [self.net, self.fpn.b1, self.fpn.c1, self.fpn.b2, 
+                self.fpn.c2, self.fpn.b3, self.head.cv[0],
+                self.fpn.c3, self.fpn.b4, self.head.cv[1],
+                self.fpn.c4, self.fpn.b5, self.head.cv[2]]
     
     def forward(self, x, targets=None):
-        p8, p16, p32 = self.head(*self.back(x))
-        p8, p16, p32 = map(lambda x, n: n(x), [p8, p16, p32], self.neck)
-        return self.yolo(p8, p16, p32, targets=targets)
+        x = self.net(x)
+        x = self.fpn(*x)
+        return self.head(x, targets=targets)
 
 class Yolov4Tiny(nn.Module):
     def __init__(self, nclasses):
         super().__init__()
-        self.back = BackboneV4Tiny()
-        self.head = HeadV3Tiny(512)
-        self.neck = nn.ModuleList([nn.Sequential(Conv(c1, c2, 3, act=actV3), nn.Conv2d(c2, (nclasses+5)*3, 1)) for c1, c2 in [(384, 256), (256, 512)]])
-        self.yolo = DetectV3(nclasses, [16,32], ANCHORS_V3_TINY, [1.05,1.5])
+        self.net  = BackboneV4Tiny()
+        self.fpn  = HeadV3Tiny(512)
+        self.head = DetectV3(nclasses, [16,32], ANCHORS_V3_TINY, [1.05,1.5], ch=[(384, 256), (256, 512)])
 
     def layers(self):
-        return [self.back, self.head.b1, self.neck[1], self.head.c2, self.neck[0]]
+        return [self.net, self.fpn.b1, self.head.cv[1], self.fpn.c2, self.head.cv[0]]
     
     def forward(self, x, targets=None):
-        p16, p32 = self.head(*self.back(x))
-        p16, p32 = map(lambda x, n: n(x), [p16, p32], self.neck)
-        return self.yolo(p16, p32, targets=targets)
+        x = self.net(x)
+        x = self.fpn(*x)
+        return self.head(x, targets=targets)
 
 class Yolov7(nn.Module):
     def __init__(self, nclasses):
         super().__init__()
-        c3          = (nclasses+5)*3
-        self.back   = BackboneV7()
-        self.head   = HeadV7()
-        self.neck1  = nn.ModuleList([RepConv(c1, c2) for c1, c2 in [(128,256), (256,512), (512,1024)]])
-        self.neck2  = nn.ModuleList([nn.Conv2d(c2, c3, 1) for c2 in [256, 512, 1024]])
-        self.yolo   = DetectV3(nclasses, [8,16,32], ANCHORS_V7, [1,1,1], is_v7=True)
+        ch = [(128,256), (256,512), (512,1024)]
+        self.net  = BackboneV7()
+        self.fpn  = HeadV7()
+        self.head = DetectV3(nclasses, [8,16,32], ANCHORS_V7, [2,2,2], ch=ch, is_v7=True)
+
+    def layers(self):
+        return [self.net, self.fpn, self.head.cv[0][0], self.head.cv[1][0], self.head.cv[2][0], self.head.cv[0][1], self.head.cv[1][1], self.head.cv[2][1]]
        
     def forward(self, x, targets=None):
-        p8, p16, p32 = self.head(*self.back(x))
-        p8, p16, p32 = map(lambda x, n1, n2: n2(n1(x)), [p8, p16, p32], self.neck1, self.neck2)
-        return self.yolo(p8, p16, p32, targets=targets)
+        x = self.net(x)
+        x = self.fpn(*x)
+        return self.head(x, targets=targets)
 
 class Yolov5(nn.Module):
     def __init__(self, variant, num_classes):
@@ -977,17 +962,19 @@ def load_darknet(net: Union[Yolov3, Yolov3Tiny, Yolov4, Yolov4Tiny], weights_pat
         assert (nP1 := count_parameters(net) * 4) == (nP2 := f.tell() - offset), f"{nP1} != {nP2}"
 
 def load_yolov7(net: Yolov7, weights_pt: str):
-    state1 = net.state_dict()
-    state2 = torch.load(weights_pt, map_location='cpu')
+    def params1():
+        for l in net.layers():
+            for k, v in l.state_dict().items():
+                if 'anchor' not in k:
+                    yield v
+    
+    def params2():
+        state2 = torch.load(weights_pt, map_location='cpu')
+        for k, v in state2.items():
+            if 'anchor' not in k:
+                yield v
 
-    del state1['yolo.anchors']
-
-    for anchor_key in [k for k in state2.keys() if 'anchor' in k]:
-        del state2[anchor_key]
-
-    assert (nP1 := len(state1)) == (nP2 := len(state2)), f"{nP1} != {nP2}"
-
-    for p1, p2 in zip(state1.values(), state2.values(), strict=True):
+    for p1, p2 in zip(params1(), params2(), strict=True):
         p1.data.copy_(p2.data)
 
     init_batchnorms(net)

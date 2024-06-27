@@ -1,16 +1,13 @@
-import math
 from   typing import Union
 from   copy import deepcopy
-from   itertools import chain
 from   functools import partial
 import numpy as np
-import numba as nb
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
 from   torch.utils.cpp_extension import load
-from   einops import rearrange, repeat, pack, unpack
+from   einops import rearrange, repeat, pack
 
 assigner = load(name="assigner", sources=["assigner.cpp"], extra_cflags=["-O3", "-ffast-math", "-march=native", "-std=c++20"], verbose=True)
 

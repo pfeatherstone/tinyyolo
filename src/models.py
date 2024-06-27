@@ -1,6 +1,7 @@
 import math
-from   typing import Union, List
+from   typing import Union
 from   copy import deepcopy
+from   itertools import chain
 from   functools import partial
 import numpy as np
 import numba as nb
@@ -8,7 +9,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
-from   einops import rearrange, repeat
+from   torch.utils.cpp_extension import load
+from   einops import rearrange, repeat, pack, unpack
+
+assigner = load(name="assigner", sources=["assigner.cpp"], extra_cflags=["-O3", "-ffast-math", "-march=native", "-std=c++20"], verbose=True)
 
 COCO_NAMES = [
     'person',           'bicycle',      'car',          'motorbike',    'aeroplane',    
@@ -672,37 +676,7 @@ class DetectV10(Detect):
     def forward(self, x):
         # TODO: implement all the topk stuff. I think yolov10 doesn't need NMS. But you can you use it in inference mode for now.
         return self.inference(self.forward_feat(x, self.one2one_cv2, self.one2one_cv3))
-
-@nb.njit
-def build_targets_v3(B: int, H: int, W: int, C: int, stride: int, anchors: np.ndarray, targets: np.ndarray):
-    def wh_iou(wh1, wh2):
-        area1   = wh1[0] * wh1[1]
-        area2   = wh2[:,0] * wh2[:,1]
-        inter   = np.minimum(wh1, wh2)
-        inter   = inter[:,0]*inter[:,1]
-        union   = area1+area2-inter
-        return inter/union
-
-    target_tensor = np.zeros((B, anchors.shape[0], H, W, 6+C), dtype=np.float32)
-    for b, tgt in enumerate(targets):
-        for tgti in tgt:
-            if tgti[4] > -1:
-                box, c  = tgti[:4], int(tgti[4])
-                wh      = box[2:]-box[:2]  
-                x       = int(math.floor(0.5 * (box[0] + box[2]) / stride))
-                y       = int(math.floor(0.5 * (box[1] + box[3]) / stride))
-                ious    = wh_iou(wh, anchors)
-                scores  = ious / np.max(ious)
-                for a, (s1,s2) in enumerate(zip(ious, scores)):
-                    if s1 > target_tensor[b, a, y, x, -1]:
-                        target_tensor[b, a, y, x, :4]   = box
-                        target_tensor[b, a, y, x, 4]    = s2
-                        target_tensor[b, a, y, x, 5:]   = 0 #overwrite last cls index (and last iou value)
-                        target_tensor[b, a, y, x, 5+c]  = 1
-                        target_tensor[b, a, y, x, -1]   = s1
-
-    return target_tensor[...,:-1]
-
+        
 class DetectV3(nn.Module):
     def __init__(self, nc, strides, anchors, scales, ch, is_v7=False):
         super().__init__()
@@ -715,14 +689,20 @@ class DetectV3(nn.Module):
         self.v7         = is_v7
 
     @torch.no_grad()
-    def make_anchors(self, x, awh):
-        a, h, w = awh.shape[0], x.shape[2], x.shape[3]
-        sx      = torch.arange(end=w, device=x.device) + 0.5
-        sy      = torch.arange(end=h, device=x.device) + 0.5
-        sy, sx  = torch.meshgrid(sy, sx, indexing='ij')
-        xy      = repeat([sx,sy], 'c h w -> (a h w) c', a=a)
-        awh     = repeat(awh, 'a c -> (a h w) c', h=h, w=w)
-        return xy, awh
+    def make_anchors(self, feats):
+        xys, awhs, strides, scales = [], [], [], []
+        for x, awh , stride, scale in zip(feats, self.anchors_wh, self.strides, self.scales):
+            a, h, w = awh.shape[0], x.shape[2], x.shape[3]
+            sx      = (torch.arange(end=w, device=x.device) + 0.5) * stride
+            sy      = (torch.arange(end=h, device=x.device) + 0.5) * stride
+            sy, sx  = torch.meshgrid(sy, sx, indexing='ij')
+            xy      = repeat([sx,sy], 'c h w -> (a h w) c', a=a)
+            awh     = repeat(awh, 'a c -> (a h w) c', h=h, w=w)
+            xys.append(xy)
+            awhs.append(awh)
+            strides.append(torch.full((a*h*w,1), fill_value=stride, device=x.device))
+            scales.append(torch.full((a*h*w,1), fill_value=scale, device=x.device))
+        return *pack(xys, '* c'), torch.cat(awhs,0), torch.cat(strides,0), torch.cat(scales,0)
 
     def to_wh(self, wh, awh):
         match self.v7:
@@ -730,60 +710,27 @@ class DetectV3(nn.Module):
             case False: return awh * wh.exp()
     
     def forward(self, xs, targets=None):
-        xs = [n(x) for n, x in zip(self.cv, xs)]
-
-        preds = []
-        for x, awh, stride, scale in zip(xs, self.anchors_wh, self.strides, self.scales):
-            sxy, awh        = self.make_anchors(x, awh)
-            xy, wh, l, cls  = rearrange(x, 'b (a f) h w -> b (a h w) f', f=self.nc+5).split((2,2,1,self.nc), -1) 
-            xy              = stride * ((xy.sigmoid() - 0.5) * scale + sxy)
-            wh              = self.to_wh(wh, awh)
-            box             = torch.cat([xy-wh/2, xy+wh/2], -1)
-            pred            = torch.cat([box, l.sigmoid(), cls.sigmoid()], -1)
-            preds.append(pred)
-        
-        return torch.cat(preds, 1)
-
-        anchors, strides, scales = self.make_anchors(x)
-        anchors, strides, scales = map(lambda v: torch.cat(v, 0), (anchors, strides, scales))
-        dets            = torch.cat([rearrange(xi, 'b (a f) h w -> b (a h w) f', f=self.nc+5) for xi in x], 1)
-        xy, wh, l, cls  = dets.split((2,2,1,self.nc), -1)
-        xy              = self.to_xy(xy, anchors[:,:2], scales, strides)
-        wh              = self.to_wh(wh, anchors[:,2:])
+        sxy, ps, awh, strides, scales = self.make_anchors(xs)
+        feats           = list(map(lambda n,x: rearrange(n(x), 'b (a f) h w -> b (a h w) f', f=self.nc+5), self.cv, xs))
+        xy, wh, l, cls  = torch.cat(feats,1).split((2,2,1,self.nc), -1) 
+        xy              = strides * ((xy.sigmoid() - 0.5) * scales) + sxy
+        wh              = self.to_wh(wh, awh)
         box             = torch.cat([xy-wh/2, xy+wh/2], -1)
         pred            = torch.cat([box, l.sigmoid(), cls.sigmoid()], -1)
-        return pred
 
-        preds       = []
-        loss_iou    = 0
-        loss_cls    = 0
-        loss_obj    = 0
-        loss_noobj  = 0
+        if exists(targets):
+            anchors  = torch.cat([sxy-awh/2, sxy+awh/2],-1)
+            tgts     = assigner.atss(anchors, targets, [p[0] for p in ps], self.nc, 9)
+            mask     = tgts[...,4] > 0
+            tgts     = tgts[mask]
+            pnoobj   = l[~mask]
 
-        for x, stride, awh, scale in zip(xs, self.strides, self.anchors_wh, self.scales):
-            anchors         = self.make_anchors(x, awh)
-            dets            = rearrange(x, 'b (a f) h w -> b (a h w) f', f=self.C+5)
-            xy, wh, l, cls  = dets.split((2,2,1,self.C), -1)
-            xy              = self.to_xy(xy, anchors[:,:2], scale, stride)
-            wh              = self.to_wh(wh, anchors[:,2:])
-            box             = torch.cat([xy-wh/2, xy+wh/2], -1)
-            pred            = torch.cat([box, l.sigmoid(), cls.sigmoid()], -1)
-            preds.append(pred)
+            loss_iou    = torchvision.ops.complete_box_iou_loss(box[mask], tgts[:,:4], reduction='mean')
+            loss_cls    = F.binary_cross_entropy_with_logits(cls[mask], tgts[:,5:])
+            loss_obj    = F.binary_cross_entropy_with_logits(l[mask], tgts[:,4:5])
+            loss_noobj  = F.binary_cross_entropy_with_logits(pnoobj, torch.zeros_like(pnoobj))
 
-            if exists(targets):
-                tgt     = torch.from_numpy(build_targets_v3(x.shape[0], x.shape[2], x.shape[3], self.C, stride, anchor.cpu().numpy(), targets.cpu().numpy())).to(x.device)
-                mask    = tgt[...,4] > 0
-                tgt     = tgt[mask]
-                pnoobj  = l[~mask]
-
-                loss_iou    += torchvision.ops.complete_box_iou_loss(box[mask], tgt[:,:4], reduction='mean')
-                loss_cls    += F.binary_cross_entropy_with_logits(cls[mask], tgt[:,5:])
-                loss_obj    += F.binary_cross_entropy_with_logits(l[mask], tgt[:,4:5])
-                loss_noobj  += F.binary_cross_entropy_with_logits(pnoobj, torch.zeros_like(pnoobj))
-                
-        preds  = torch.cat(preds, 1)
-        losses = {'iou': loss_iou, 'cls': loss_cls, 'obj': loss_obj, 'noobj': loss_noobj} if exists(targets) else None
-        return (preds, losses) if exists(losses) else preds
+        return pred if not exists(targets) else (pred, {'iou': loss_iou, 'cls': loss_cls, 'obj': loss_obj, 'noobj' : loss_noobj})
     
 class Yolov3(nn.Module):
     def __init__(self, nclasses, spp):

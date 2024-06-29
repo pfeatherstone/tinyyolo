@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
 from   torch.utils.cpp_extension import load
-from   einops import rearrange, repeat, pack
+from   einops import rearrange, repeat, pack, unpack
 
 assigner = load(name="assigner", sources=["assigner.cpp"], extra_cflags=["-O3", "-ffast-math", "-march=native", "-std=c++20"], verbose=True)
 

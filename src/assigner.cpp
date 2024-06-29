@@ -44,6 +44,9 @@ torch::Tensor assign_atss (
     long                topk     // Number of candidates per pyramic level
 )
 {
+    auto device    = anchors.device();
+    anchors        = anchors.to(torch::TensorOptions(torch::Device("cpu")));
+    targets        = targets.to(torch::TensorOptions(torch::Device("cpu")));
     auto anchors_a = anchors.accessor<float,2>();
     auto targets_a = targets.accessor<float,3>();
     const long B = targets_a.size(0);
@@ -127,7 +130,7 @@ torch::Tensor assign_atss (
             if (targets2_a[b][n][4] > 0)
                 targets2_a[b][n][4] = 1.0;
 
-    return targets2;
+    return targets2.to(device);
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {

@@ -1,7 +1,6 @@
 #include <cmath>
 #include <array>
 #include <torch/extension.h>
-#include <pybind11/numpy.h>
 
 namespace py = pybind11;
 

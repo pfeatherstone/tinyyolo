@@ -1,39 +1,35 @@
 #include <cmath>
+#include <array>
 #include <torch/extension.h>
 #include <pybind11/numpy.h>
 
 namespace py = pybind11;
 
-struct box 
-{
-    float x0{0.0f}; 
-    float y0{0.0f}; 
-    float x1{0.0f}; 
-    float y1{0.0f}; 
-    float cx() const    { return 0.5 * (x0 + x1); }
-    float cy() const    { return 0.5 * (y0 + y1); }
-    float w() const     { return std::max(0.0f, x1 - x0); }
-    float h() const     { return std::max(0.0f, y1 - y0); }
-    float area() const  { return w() * h(); }
-    bool  contains(const float cx, const float cy) const { return cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1; }
-};
+using box = std::array<float,4>;
+
+float cx(const box& b)      { return 0.5 * (b[0] + b[2]); }
+float cy(const box& b)      { return 0.5 * (b[1] + b[3]); }
+float width(const box& b)   { return std::max(0.0f, b[2] - b[0]); }
+float height(const box& b)  { return std::max(0.0f, b[3] - b[1]); }
+float area(const box& b)    { return width(b) * height(b); }
+bool  contains(const box& b, float cx, float cy) { return cx >= b[0] && cx <= b[2] && cy >= b[1] && cy <= b[3]; }
 
 box inter(const box& b0, const box& b1) 
 { 
-    return {.x0 = std::max(b0.x0, b1.x0),
-            .y0 = std::max(b0.y0, b1.y0),
-            .x1 = std::min(b0.x1, b1.x1),
-            .y1 = std::min(b0.y1, b1.y1)};
+    return {std::max(b0[0], b1[0]),
+            std::max(b0[1], b1[1]),
+            std::min(b0[2], b1[2]),
+            std::min(b0[3], b1[3])};
 }
 
 float iou(const box& b0, const box& b1) 
 { 
-    return inter(b0, b1).area() / (b0.area() + b1.area() - inter(b0, b1).area() + 1e-8);
+    return area(inter(b0, b1)) / (area(b0) + area(b1) - area(inter(b0, b1)) + 1e-8);
 }
 
 float dist(const box& b0, const box& b1)
 {
-    return std::sqrt(std::pow(b0.cx() - b1.cx(), 2) + std::pow(b0.cy() - b1.cy(), 2));
+    return std::sqrt(std::pow(cx(b0) - cx(b1), 2) + std::pow(cy(b0) - cy(b1), 2));
 }
 
 torch::Tensor assign_atss (
@@ -66,11 +62,13 @@ torch::Tensor assign_atss (
         {
             if (targets_a[b][d][4] > -1)
             {
+                const box bt = {targets_a[b][d][0], targets_a[b][d][1], targets_a[b][d][2], targets_a[b][d][3]};
+                const int cls = targets_a[b][d][4];
+
                 // 1. Calculate IOUs and L2s
                 for (long n = 0 ; n < N ; ++n)
                 {
                     const box ba = {anchors_a[n][0], anchors_a[n][1], anchors_a[n][2], anchors_a[n][3]};
-                    const box bt = {targets_a[b][d][0], targets_a[b][d][1], targets_a[b][d][2], targets_a[b][d][3]};
                     dists[n] = dist(ba, bt);
                     ious[n]  = iou(ba, bt);
                 }
@@ -101,21 +99,17 @@ torch::Tensor assign_atss (
                 const float stdev   = std::sqrt(x2 / candidates.size() - mu*mu);
                 const float thresh  = mu + stdev;
 
-                // printf("target[%ld][%ld] iou mu %f std %f thresh %f - ncandidates %zu\n", b, d, mu, stdev, thresh, candidates.size());
-
                 // 5. Add to targets2
                 for (long n : candidates)
                 {
                     const box ba = {anchors_a[n][0], anchors_a[n][1], anchors_a[n][2], anchors_a[n][3]};
-                    const box bt = {targets_a[b][d][0], targets_a[b][d][1], targets_a[b][d][2], targets_a[b][d][3]};
                     
-                    if (ious[n] > thresh && bt.contains(ba.cx(), ba.cy()) && ious[n] > targets2_a[b][n][4])
+                    if (ious[n] > thresh && contains(bt, cx(ba), cy(ba)) && ious[n] > targets2_a[b][n][4])
                     {                            
-                        const int cls           = targets_a[b][d][4];
-                        targets2_a[b][n][0]     = targets_a[b][d][0];
-                        targets2_a[b][n][1]     = targets_a[b][d][1];
-                        targets2_a[b][n][2]     = targets_a[b][d][2];
-                        targets2_a[b][n][3]     = targets_a[b][d][3];
+                        targets2_a[b][n][0]     = bt[0];
+                        targets2_a[b][n][1]     = bt[1];
+                        targets2_a[b][n][2]     = bt[2];
+                        targets2_a[b][n][3]     = bt[3];
                         targets2_a[b][n][4]     = ious[n];
                         targets2_a[b][n][5+cls] = 1;
                     }

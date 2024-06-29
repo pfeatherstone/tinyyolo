@@ -683,7 +683,7 @@ def assign_atss (
     topk     # int
 ):
     # Prep
-    B, D = targets.shape[0], targets.shape[1]
+    B, D, N, device = targets.shape[0], targets.shape[1], anchors.shape[0], anchors.device
     
     # Calculate all IOUs and distances between targets and anchors
     ious        = torchvision.ops.box_iou(targets[...,:4].reshape([-1, 4]), anchors).reshape([B,D,-1]) # [B,D,N]
@@ -699,10 +699,12 @@ def assign_atss (
         indices.append(distl.topk(topk, dim=-1, largest=False)[1] + offset)
         offset += num[0]
     indices = torch.cat(indices, -1)
+    mask_topk = torch.zeros((B, D, N), dtype=torch.bool, device=device)
+    mask_topk.scatter_(2, indices, torch.ones_like(indices, dtype=torch.bool))
 
     # IOU thresh mask
     ious_idx = ious.gather(2, indices)
-    thresh   = ious_idx.mean(2, keepdim=True) + ious_idx.std(2, keepdim=True)
+    thresh   = ious_idx.mean(2, keepdim=True) + ious_idx.std(2, keepdim=True, correction=0)
     mask_iou = ious > thresh
 
     # Centre mask
@@ -710,18 +712,18 @@ def assign_atss (
     mask_centre = bbox_deltas.amin(3) > 1e-9
 
     # Combine masks
-    mask_gt       = (targets[...,-1] > -1).unsqueeze(-1)
-    mask          = mask_gt * mask_centre * mask_iou
+    mask_gt = (targets[...,-1] > -1).unsqueeze(-1)
+    mask    = mask_gt * mask_centre * mask_iou * mask_topk
 
     # Best IOU for each anchor
     scores, indices = (ious * mask).max(1)
-    mask = scores > 0
+    mask = scores > 1e-9
     
     # Combine
     targets_box     = targets.gather(1, repeat(indices, 'b n -> b n f', f=4))
     targets_cls     = targets[...,4].long().gather(1, indices)
     targets_cls     = F.one_hot(targets_cls, num_classes=nc)
-    targets_score   = scores.unsqueeze(-1)
+    targets_score   = mask.unsqueeze(-1).float()
     targets         = torch.cat([targets_box, targets_score, targets_cls], -1)
     targets[~mask] = 0
 

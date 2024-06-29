@@ -16,10 +16,7 @@ bool  contains(const box& b, float cx, float cy) { return cx >= b[0] && cx <= b[
 
 box inter(const box& b0, const box& b1) 
 { 
-    return {std::max(b0[0], b1[0]),
-            std::max(b0[1], b1[1]),
-            std::min(b0[2], b1[2]),
-            std::min(b0[3], b1[3])};
+    return {std::max(b0[0], b1[0]), std::max(b0[1], b1[1]), std::min(b0[2], b1[2]), std::min(b0[3], b1[3])};
 }
 
 float iou(const box& b0, const box& b1) 

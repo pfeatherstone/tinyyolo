@@ -673,7 +673,60 @@ class DetectV10(Detect):
     def forward(self, x):
         # TODO: implement all the topk stuff. I think yolov10 doesn't need NMS. But you can you use it in inference mode for now.
         return self.inference(self.forward_feat(x, self.one2one_cv2, self.one2one_cv3))
-        
+
+@torch.no_grad()
+def assign_atss (
+    anchors, # Tensor[N,4]
+    targets, # Tensor[B,D,5]
+    ps,      # List[3]
+    nc,      # int
+    topk     # int
+):
+    # Prep
+    B, D = targets.shape[0], targets.shape[1]
+    
+    # Calculate all IOUs and distances between targets and anchors
+    ious        = torchvision.ops.box_iou(targets[...,:4].reshape([-1, 4]), anchors).reshape([B,D,-1]) # [B,D,N]
+    sxy         = (anchors[:,0:2] + anchors[:,2:4]) / 2
+    tlt, trb    = targets[...,0:2], targets[...,2:4]
+    txy         = (tlt + trb) / 2
+    dists       = torch.cdist(txy.reshape([-1,2]), sxy).reshape([B,D,-1])
+
+    # Select topk for each level
+    indices = []
+    offset  = 0
+    for distl, num in zip(unpack(dists, ps, 'b a *'), ps):
+        indices.append(distl.topk(topk, dim=-1, largest=False)[1] + offset)
+        offset += num[0]
+    indices = torch.cat(indices, -1)
+
+    # IOU thresh mask
+    ious_idx = ious.gather(2, indices)
+    thresh   = ious_idx.mean(2, keepdim=True) + ious_idx.std(2, keepdim=True)
+    mask_iou = ious > thresh
+
+    # Centre mask
+    bbox_deltas = torch.cat((sxy[None,None] - tlt.unsqueeze(2), trb.unsqueeze(2) - sxy[None,None]), -1)
+    mask_centre = bbox_deltas.amin(3) > 1e-9
+
+    # Combine masks
+    mask_gt       = (targets[...,-1] > -1).unsqueeze(-1)
+    mask          = mask_gt * mask_centre * mask_iou
+
+    # Best IOU for each anchor
+    scores, indices = (ious * mask).max(1)
+    mask = scores > 0
+    
+    # Combine
+    targets_box     = targets.gather(1, repeat(indices, 'b n -> b n f', f=4))
+    targets_cls     = targets[...,4].long().gather(1, indices)
+    targets_cls     = F.one_hot(targets_cls, num_classes=nc)
+    targets_score   = scores.unsqueeze(-1)
+    targets         = torch.cat([targets_box, targets_score, targets_cls], -1)
+    targets[~mask] = 0
+
+    return targets
+
 class DetectV3(nn.Module):
     def __init__(self, nc, strides, anchors, scales, ch, is_v7=False):
         super().__init__()
@@ -718,6 +771,7 @@ class DetectV3(nn.Module):
         if exists(targets):
             anchors  = torch.cat([sxy-awh/2, sxy+awh/2],-1)
             tgts     = assigner.atss(anchors, targets, [p[0] for p in ps], self.nc, 9)
+            # tgts2    = assign_atss(anchors, targets, ps, self.nc, 9)
             mask     = tgts[...,4] > 0
             tgts     = tgts[mask]
             pnoobj   = l[~mask]

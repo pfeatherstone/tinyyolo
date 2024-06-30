@@ -44,10 +44,10 @@ torch::Tensor assign_atss (
     const long B = targets_a.size(0);
     const long D = targets_a.size(1);
     const long N = anchors_a.size(0);
-    std::vector<float>  ious(N);
+    std::vector<float>  ious(ps.size()*topk);
     std::vector<float>  dists(N);
     std::vector<long>   indices;
-    std::vector<long>   candidates;
+    std::vector<long>   candidates(ps.size()*topk);
 
     auto targets2   = torch::zeros({B, N, 5+nc});
     auto targets2_a = targets2.accessor<float,3>();
@@ -61,34 +61,34 @@ torch::Tensor assign_atss (
                 const box bt = {targets_a[b][d][0], targets_a[b][d][1], targets_a[b][d][2], targets_a[b][d][3]};
                 const int cls = targets_a[b][d][4];
 
-                // 1. Calculate IOUs and L2s
+                // 1. Calculate L2s
                 for (long n = 0 ; n < N ; ++n)
                 {
                     const box ba = {anchors_a[n][0], anchors_a[n][1], anchors_a[n][2], anchors_a[n][3]};
                     dists[n] = dist(ba, bt);
-                    ious[n]  = iou(ba, bt);
                 }
 
                 // 2. Select topk from each level
                 long start = 0;
-                candidates.clear();
-                candidates.reserve(ps.size() * topk);
                 for (long l = 0 ; l < ps.size() ; ++l)
                 {
                     indices.resize(ps[l]);
                     std::iota(begin(indices), end(indices), start);
                     std::partial_sort(begin(indices), begin(indices) + topk, end(indices), [&](long i, long j) {return dists[i] < dists[j];});
-                    candidates.insert(end(candidates), begin(indices), begin(indices) + topk);
+                    std::copy(begin(indices), begin(indices) + topk, begin(candidates) + l*topk);
                     start += ps[l];
                 }
 
-                // 3. Calculate thresh
+                // 3. Calculate IOUs and thresh
                 float x  = 0.0f;
                 float x2 = 0.0f;
-                for (long n : candidates)
+                for (size_t i = 0 ; i < candidates.size() ; ++i)
                 {
-                    x  += ious[n];
-                    x2 += ious[n] * ious[n];
+                    const long n = candidates[i];
+                    const box ba = {anchors_a[n][0], anchors_a[n][1], anchors_a[n][2], anchors_a[n][3]};
+                    ious[i] = iou(ba, bt);
+                    x  += ious[i];
+                    x2 += ious[i] * ious[i];
                 }
 
                 const float mu      = x / candidates.size();
@@ -96,17 +96,18 @@ torch::Tensor assign_atss (
                 const float thresh  = mu + stdev;
 
                 // 5. Add to targets2
-                for (long n : candidates)
+                for (size_t i = 0 ; i < candidates.size() ; ++i)
                 {
+                    const long n = candidates[i];
                     const box ba = {anchors_a[n][0], anchors_a[n][1], anchors_a[n][2], anchors_a[n][3]};
                     
-                    if (ious[n] > thresh && contains(bt, cx(ba), cy(ba)) && ious[n] > targets2_a[b][n][4])
+                    if (ious[i] > thresh && contains(bt, cx(ba), cy(ba)) && ious[i] > targets2_a[b][n][4])
                     {                            
                         targets2_a[b][n][0]     = bt[0];
                         targets2_a[b][n][1]     = bt[1];
                         targets2_a[b][n][2]     = bt[2];
                         targets2_a[b][n][3]     = bt[3];
-                        targets2_a[b][n][4]     = ious[n];
+                        targets2_a[b][n][4]     = ious[i];
                         targets2_a[b][n][5+cls] = 1;
                     }
                 }

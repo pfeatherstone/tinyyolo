@@ -18,9 +18,40 @@ box inter(const box& b0, const box& b1)
     return {std::max(b0[0], b1[0]), std::max(b0[1], b1[1]), std::min(b0[2], b1[2]), std::min(b0[3], b1[3])};
 }
 
-float iou(const box& b0, const box& b1) 
+box convex(const box& b0, const box& b1)
+{
+    return {std::min(b0[0], b1[0]), std::min(b0[1], b1[1]), std::max(b0[2], b1[2]), std::max(b0[3], b1[3])};
+}
+
+enum iou_type {IOU, GIOU, DIOU, CIOU};
+
+float iou(const box& b0, const box& b1, const iou_type type = IOU, const double eps = 1e-8) 
 { 
-    return area(inter(b0, b1)) / (area(b0) + area(b1) - area(inter(b0, b1)) + 1e-8);
+    const float inter_ = area(inter(b0, b1));
+    const float union_ = area(b0) + area(b1) - area(inter(b0, b1));
+    const float iou_   = inter_ / (union_ + eps);
+
+    if (type == IOU)
+        return iou_;
+
+    const box convex_   = convex(b0, b1);
+    const float cw      = width(convex_);
+    const float ch      = height(convex_);
+    const float c_area  = cw*ch;
+
+    if (type == GIOU)
+        return iou_ - (c_area - union_) / (c_area + eps);
+
+    const float c2      = std::pow(cw, 2) + std::pow(ch, 2);
+    const float rho2    = std::pow(cx(b0) - cx(b1), 2) + std::pow(cy(b0) - cy(b1), 2);
+
+    if (type == DIOU)
+        return iou_ - rho2 / (c2 + eps);
+
+    const float v       = (4 / std::pow(M_PI, 2)) * std::pow(std::atan(width(b1)/height(b1)) - std::atan(width(b0)/height(b0)), 2);
+    const float alpha   = v / (v - iou_ + 1);
+
+    return iou_ - rho2 / (c2 + v * alpha + eps);
 }
 
 float dist(const box& b0, const box& b1)
@@ -114,12 +145,6 @@ torch::Tensor assign_atss (
             }
         }
     }
-
-    // 6. Set confidence back to 1
-    for (long b = 0 ; b < B ; ++b)
-        for (long n = 0 ; n < N ; ++n)
-            if (targets2_a[b][n][4] > 0)
-                targets2_a[b][n][4] = 1.0;
 
     return targets2.to(device);
 }

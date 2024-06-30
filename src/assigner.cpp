@@ -6,26 +6,26 @@ namespace py = pybind11;
 
 using box = std::array<float,4>;
 
-float cx(const box& b)      { return 0.5 * (b[0] + b[2]); }
-float cy(const box& b)      { return 0.5 * (b[1] + b[3]); }
-float width(const box& b)   { return std::max(0.0f, b[2] - b[0]); }
-float height(const box& b)  { return std::max(0.0f, b[3] - b[1]); }
-float area(const box& b)    { return width(b) * height(b); }
-bool  contains(const box& b, float cx, float cy) { return cx >= b[0] && cx <= b[2] && cy >= b[1] && cy <= b[3]; }
+constexpr float cx(const box& b)      { return 0.5 * (b[0] + b[2]); }
+constexpr float cy(const box& b)      { return 0.5 * (b[1] + b[3]); }
+constexpr float width(const box& b)   { return std::max(0.0f, b[2] - b[0]); }
+constexpr float height(const box& b)  { return std::max(0.0f, b[3] - b[1]); }
+constexpr float area(const box& b)    { return width(b) * height(b); }
+constexpr bool  contains(const box& b, const float cx, const float cy) { return cx >= b[0] && cx <= b[2] && cy >= b[1] && cy <= b[3]; }
 
-box inter(const box& b0, const box& b1) 
+constexpr box inter(const box& b0, const box& b1) 
 { 
     return {std::max(b0[0], b1[0]), std::max(b0[1], b1[1]), std::min(b0[2], b1[2]), std::min(b0[3], b1[3])};
 }
 
-box convex(const box& b0, const box& b1)
+constexpr box convex(const box& b0, const box& b1)
 {
     return {std::min(b0[0], b1[0]), std::min(b0[1], b1[1]), std::max(b0[2], b1[2]), std::max(b0[3], b1[3])};
 }
 
 enum iou_type {IOU, GIOU, DIOU, CIOU};
 
-float iou(const box& b0, const box& b1, const iou_type type = IOU, const double eps = 1e-8) 
+constexpr float iou(const box& b0, const box& b1, const iou_type type = IOU, const double eps = 1e-8) 
 { 
     const float inter_ = area(inter(b0, b1));
     const float union_ = area(b0) + area(b1) - area(inter(b0, b1));
@@ -54,12 +54,21 @@ float iou(const box& b0, const box& b1, const iou_type type = IOU, const double 
     return iou_ - rho2 / (c2 + v * alpha + eps);
 }
 
-float dist(const box& b0, const box& b1)
+constexpr float dist(const box& b0, const box& b1)
 {
     return std::sqrt(std::pow(cx(b0) - cx(b1), 2) + std::pow(cy(b0) - cy(b1), 2));
 }
 
-torch::Tensor assign_atss (
+constexpr float centreness(const box& b, const float cx, const float cy)
+{
+    const float left    = cx - b[0];
+    const float right   = b[2] - cx;
+    const float top     = cy - b[1];
+    const float bottom  = b[3] - cy;
+    return std::sqrt((std::min(left,right) * std::min(top,bottom)) / (std::max(left,right) * std::max(top,bottom)));                
+}
+
+torch::Tensor atss_fcos (
     torch::Tensor       anchors, // [N, 4]
     torch::Tensor       targets, // [B, D, 5]
     std::vector<long>   ps,      // [3]
@@ -80,7 +89,7 @@ torch::Tensor assign_atss (
     std::vector<long>   indices;
     std::vector<long>   candidates(ps.size()*topk);
 
-    auto targets2   = torch::zeros({B, N, 5+nc});
+    auto targets2   = torch::zeros({B, N, 6+nc});
     auto targets2_a = targets2.accessor<float,3>();
 
     for (long b = 0 ; b < B ; ++b)
@@ -117,7 +126,7 @@ torch::Tensor assign_atss (
                 {
                     const long n = candidates[i];
                     const box ba = {anchors_a[n][0], anchors_a[n][1], anchors_a[n][2], anchors_a[n][3]};
-                    ious[i] = iou(ba, bt);
+                    ious[i] = iou(ba, bt, CIOU);
                     x  += ious[i];
                     x2 += ious[i] * ious[i];
                 }
@@ -132,14 +141,15 @@ torch::Tensor assign_atss (
                     const long n = candidates[i];
                     const box ba = {anchors_a[n][0], anchors_a[n][1], anchors_a[n][2], anchors_a[n][3]};
                     
-                    if (ious[i] > thresh && contains(bt, cx(ba), cy(ba)) && ious[i] > targets2_a[b][n][4])
+                    if (ious[i] > thresh && contains(bt, cx(ba), cy(ba)) && ious[i] > targets2_a[b][n][5])
                     {                            
                         targets2_a[b][n][0]     = bt[0];
                         targets2_a[b][n][1]     = bt[1];
                         targets2_a[b][n][2]     = bt[2];
                         targets2_a[b][n][3]     = bt[3];
-                        targets2_a[b][n][4]     = ious[i];
-                        targets2_a[b][n][5+cls] = 1;
+                        targets2_a[b][n][4]     = centreness(bt, cx(ba), cy(ba));
+                        targets2_a[b][n][5]     = ious[i];
+                        targets2_a[b][n][6+cls] = 1;
                     }
                 }
             }
@@ -150,5 +160,5 @@ torch::Tensor assign_atss (
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("atss", &assign_atss, "ATSS assigner");
+    m.def("atss", &atss_fcos, "ATSS assigner");
 }

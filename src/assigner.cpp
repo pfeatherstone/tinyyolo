@@ -44,14 +44,15 @@ constexpr float iou(const box& b0, const box& b1, const iou_type type = IOU, con
 
     const float c2      = std::pow(cw, 2) + std::pow(ch, 2);
     const float rho2    = std::pow(cx(b0) - cx(b1), 2) + std::pow(cy(b0) - cy(b1), 2);
+    const float diou_   = iou_ - rho2 / (c2 + eps);
 
     if (type == DIOU)
-        return iou_ - rho2 / (c2 + eps);
+        return diou_;
 
     const float v       = (4 / std::pow(M_PI, 2)) * std::pow(std::atan(width(b1)/height(b1)) - std::atan(width(b0)/height(b0)), 2);
-    const float alpha   = v / (v - iou_ + 1);
+    const float alpha   = v / (1 - iou_ + v + eps);
 
-    return iou_ - rho2 / (c2 + v * alpha + eps);
+    return diou_ - alpha * v;
 }
 
 constexpr float dist(const box& b0, const box& b1)

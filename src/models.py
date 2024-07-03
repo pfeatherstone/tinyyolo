@@ -617,9 +617,9 @@ def dfl_loss (
     target_bbox,        # [B,N,4] (input resolution)
     target_mask,        # [B,N]
     target_scores_sum,  # [0]
-    sxy,                # [N,2]
+    sxy,                # [N,2] (input resolution)
     strides,            # [N]
-    pred_dists          # [B,4,reg_max]
+    pred_dists          # [B,N,4,reg_max]
 ) :
     # Bring back to feature pyramid level resolution
     target_bbox = target_bbox / strides

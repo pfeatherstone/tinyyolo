@@ -613,122 +613,36 @@ class HeadV10(nn.Module):
         x22 = self.n6(torch.cat([self.n5(x19),x10], 1)) # 22 (P5/32-large)
         return [x16, x19, x22]
 
-def make_anchors(feats, strides, grid_cell_offset=0.5):
-    sxy             = []
-    strides_tensor  = []
-    for x, stride in zip(feats, strides):
-        h, w    = x.shape[2:]
-        sx      = torch.arange(end=w, device=x.device) + grid_cell_offset  # shift x
-        sy      = torch.arange(end=h, device=x.device) + grid_cell_offset  # shift y
-        sy, sx  = torch.meshgrid(sy, sx, indexing='ij')
-        sxy.append(torch.stack([sx,sy],0).flatten(-2))
-        strides_tensor.append(torch.full((h*w,), fill_value=stride, device=x.device))
-    return torch.cat(sxy, 1), torch.cat(strides_tensor)
+def dfl_loss (
+    target_bbox,        # [B,N,4] (input resolution)
+    target_mask,        # [B,N]
+    target_scores_sum,  # [0]
+    sxy,                # [N,2]
+    strides,            # [N]
+    pred_dists          # [B,4,reg_max]
+) :
+    # Bring back to feature pyramid level resolution
+    target_bbox = target_bbox / strides
+    sxy         = sxy / strides
 
-class Detect(nn.Module):
-    def __init__(self, nc=80, ch=()):
-        super().__init__()
-        self.nc         = nc                        # number of classes
-        self.reg_max    = 16                        # DFL channels (ch[0] // 16 to scale 4/8/12/16/20 for n/s/m/l/x)
-        self.no         = nc + self.reg_max * 4     # number of outputs per anchor
-        self.strides    = [8, 16, 32]               # strides computed during build
-        self.c2         = max((16, ch[0] // 4, self.reg_max * 4))
-        self.c3         = max(ch[0], min(self.nc, 100))  # channels
-        self.cv2        = nn.ModuleList(nn.Sequential(Conv(x, self.c2, 3), Conv(self.c2, self.c2, 3), nn.Conv2d(self.c2, 4 * self.reg_max, 1)) for x in ch)
-        self.cv3        = nn.ModuleList(nn.Sequential(Conv(x, self.c3, 3), Conv(self.c3, self.c3, 3), nn.Conv2d(self.c3, self.nc, 1)) for x in ch)
-        self.r          = nn.Parameter(torch.arange(self.reg_max).float(), requires_grad=False)
+    # Distance
+    reg_max      = pred_dists.shape[-1]
+    lt, rb       = target_bbox.chunk(2,2)
+    target_dists = torch.cat((sxy - lt, rb - sxy), -1).clamp_(0, reg_max - 1 - 0.01)
+    target_dists = target_dists[target_mask]
+    pred_dists   = pred_dists[target_mask].view(-1, reg_max)
 
-    def forward_feat(self, x, cv2, cv3):
-        return [torch.cat((c1(xi), c2(xi)), 1) for xi,c1,c2 in zip(x,cv2,cv3)]
+    tl = target_dists.long()    # target left
+    tr = tl + 1                 # target right
+    wl = tr - target_dists      # weight left
+    wr = 1 - wl                 # weight right
+    loss_dfl = (
+        F.cross_entropy(pred_dists, tl.view(-1), reduction="none").view(tl.shape) * wl + 
+        F.cross_entropy(pred_dists, tr.view(-1), reduction="none").view(tl.shape) * wr
+    ).mean(-1, keepdim=True).sum() / target_scores_sum
 
-    def inference(self, x):
-        sxy, strides = make_anchors(x, self.strides)
-        x            = torch.cat([xi.flatten(2) for xi in x], 2)
-        dist, cls    = x.split((4 * self.reg_max, self.nc), 1)
-        dist         = rearrange(dist, 'b (k r) a -> b k r a', k=4).softmax(2)
-        dist         = torch.einsum('bkra, r -> bka', dist, self.r)
-        lt, rb       = dist.chunk(2, dim=1)
-        x1y1         = sxy - lt
-        x2y2         = sxy + rb
-        box          = torch.cat([x1y1,x2y2],1) * strides
-        preds        = torch.cat((box, cls.sigmoid()), 1)
-        return preds.transpose(1,2)
+    return loss_dfl
     
-    def forward(self, x):
-        return self.inference(self.forward_feat(x, self.cv2, self.cv3))
-        
-class DetectV10(Detect):
-    def __init__(self, nc=80, ch=()):
-        super().__init__(nc, ch)
-        self.cv3 = nn.ModuleList(nn.Sequential(Conv(x, x, 3, g=x), 
-                                               Conv(x, self.c3, 1),
-                                               Conv(self.c3, self.c3, 3, g=self.c3), 
-                                               Conv(self.c3, self.c3, 1),
-                                               nn.Conv2d(self.c3, self.nc, 1)) for x in ch)
-
-        self.one2one_cv2 = deepcopy(self.cv2)
-        self.one2one_cv3 = deepcopy(self.cv3)
-        self.max_det = 100
-    
-    def forward(self, x):
-        # TODO: implement all the topk stuff. I think yolov10 doesn't need NMS. But you can you use it in inference mode for now.
-        return self.inference(self.forward_feat(x, self.one2one_cv2, self.one2one_cv3))
-
-@torch.no_grad()
-def assign_atss (
-    anchors, # Tensor[N,4]
-    targets, # Tensor[B,D,5]
-    ps,      # List[3]
-    nc,      # int
-    topk     # int
-):
-    # Prep
-    B, D, N, device = targets.shape[0], targets.shape[1], anchors.shape[0], anchors.device
-    
-    # Calculate all IOUs and distances between targets and anchors
-    ious        = torchvision.ops.box_iou(targets[...,:4].reshape([-1, 4]), anchors).reshape([B,D,-1]) # [B,D,N]
-    sxy         = (anchors[:,0:2] + anchors[:,2:4]) / 2
-    tlt, trb    = targets[...,0:2], targets[...,2:4]
-    txy         = (tlt + trb) / 2
-    dists       = torch.cdist(txy.reshape([-1,2]), sxy).reshape([B,D,-1])
-
-    # Select topk for each level
-    indices = []
-    offset  = 0
-    for distl, num in zip(unpack(dists, ps, 'b a *'), ps):
-        indices.append(distl.topk(topk, dim=-1, largest=False)[1] + offset)
-        offset += num[0]
-    indices = torch.cat(indices, -1)
-    mask_topk = torch.zeros((B, D, N), dtype=torch.bool, device=device)
-    mask_topk.scatter_(2, indices, torch.ones_like(indices, dtype=torch.bool))
-
-    # IOU thresh mask
-    ious_idx = ious.gather(2, indices)
-    thresh   = ious_idx.mean(2, keepdim=True) + ious_idx.std(2, keepdim=True, correction=0)
-    mask_iou = ious > thresh
-
-    # Centre mask
-    bbox_deltas = torch.cat((sxy[None,None] - tlt.unsqueeze(2), trb.unsqueeze(2) - sxy[None,None]), -1)
-    mask_centre = bbox_deltas.amin(3) > 1e-9
-
-    # Combine masks
-    mask_gt = (targets[...,-1] > -1).unsqueeze(-1)
-    mask    = mask_gt * mask_centre * mask_iou * mask_topk
-
-    # Best IOU for each anchor
-    scores, indices = (ious * mask).max(1)
-    mask = scores > 1e-9
-    
-    # Combine
-    targets_box     = targets.gather(1, repeat(indices, 'b n -> b n f', f=4))
-    targets_cls     = targets[...,4].long().gather(1, indices)
-    targets_cls     = F.one_hot(targets_cls, num_classes=nc)
-    targets_score   = mask.unsqueeze(-1).float()
-    targets         = torch.cat([targets_box, targets_score, targets_cls], -1)
-    targets[~mask] = 0
-
-    return targets
-
 class DetectV3(nn.Module):
     def __init__(self, nc, strides, anchors, scales, ch, is_v7=False):
         super().__init__()
@@ -771,19 +685,104 @@ class DetectV3(nn.Module):
         pred            = torch.cat([box, l.sigmoid(), cls.sigmoid()], -1)
 
         if exists(targets):
-            anchors  = torch.cat([sxy-awh/2, sxy+awh/2],-1)
-            tgts     = assigner.atss(anchors, targets, [p[0] for p in ps], self.nc, 9)
-            # tgts2    = assign_atss(anchors, targets, ps, self.nc, 9)
-            mask     = tgts[...,4] > 0
-            tgts     = tgts[mask]
-            pnoobj   = l[~mask]
+            anchors     = torch.cat([sxy-awh/2, sxy+awh/2],-1)
+            tgts        = assigner.atss(anchors, targets, [p[0] for p in ps], self.nc, 9)
+            tgt_bbox    = tgts[...,:4]
+            tgt_scores  = tgts[...,4]
+            tgt_cls     = tgts[...,6:]
+            mask        = tgt_scores > 0
 
-            loss_iou    = torchvision.ops.complete_box_iou_loss(box[mask], tgts[:,:4], reduction='mean')
-            loss_cls    = F.binary_cross_entropy_with_logits(cls[mask], tgts[:,5:])
-            loss_obj    = F.binary_cross_entropy_with_logits(l[mask], tgts[:,4:5])
-            loss_noobj  = F.binary_cross_entropy_with_logits(pnoobj, torch.zeros_like(pnoobj))
+            # CIOU loss (positive samples)
+            tgt_scores_sum = max(tgt_scores.sum(), 1)
+            weight   = tgt_scores[mask]
+            loss_iou = (torchvision.ops.complete_box_iou_loss(box[mask], tgt_bbox[mask], reduction='none') * weight).sum() / tgt_scores_sum
+            
+            # Class loss (positive samples)
+            loss_cls = F.binary_cross_entropy_with_logits(cls[mask], tgt_cls[mask], reduction='none').sum() / tgt_scores_sum
+            
+            # Objectness loss (positive + negative samples)
+            l_obj       = l[mask].squeeze(-1)
+            l_noobj     = l[~mask].squeeze(-1)
+            loss_obj    = F.binary_cross_entropy_with_logits(l_obj, tgt_scores[mask], reduction='none').sum() / tgt_scores_sum
+            loss_noobj  = F.binary_cross_entropy_with_logits(l_noobj, torch.zeros_like(l_noobj), reduction='mean')
 
-        return pred if not exists(targets) else (pred, {'iou': loss_iou, 'cls': loss_cls, 'obj': loss_obj, 'noobj' : loss_noobj})
+        return pred if not exists(targets) else (pred, {'iou': loss_iou, 'cls': loss_cls, 'obj': loss_obj, 'noobj': loss_noobj})
+
+class Detect(nn.Module):
+    def __init__(self, nc=80, ch=()):
+        super().__init__()
+        self.nc         = nc                        # number of classes
+        self.reg_max    = 16                        # DFL channels (ch[0] // 16 to scale 4/8/12/16/20 for n/s/m/l/x)
+        self.no         = nc + self.reg_max * 4     # number of outputs per anchor
+        self.strides    = [8, 16, 32]               # strides computed during build
+        self.c2         = max((16, ch[0] // 4, self.reg_max * 4))
+        self.c3         = max(ch[0], min(self.nc, 100))  # channels
+        self.cv2        = nn.ModuleList(nn.Sequential(Conv(x, self.c2, 3), Conv(self.c2, self.c2, 3), nn.Conv2d(self.c2, 4 * self.reg_max, 1)) for x in ch)
+        self.cv3        = nn.ModuleList(nn.Sequential(Conv(x, self.c3, 3), Conv(self.c3, self.c3, 3), nn.Conv2d(self.c3, self.nc, 1)) for x in ch)
+        self.r          = nn.Parameter(torch.arange(self.reg_max).float(), requires_grad=False)
+
+    @torch.no_grad()
+    def make_anchors(self, feats):
+        xys, strides = [], []
+        for x, stride in zip(feats, self.strides):
+            h, w    = x.shape[2], x.shape[3]
+            sx      = (torch.arange(end=w, device=x.device) + 0.5) * stride
+            sy      = (torch.arange(end=h, device=x.device) + 0.5) * stride
+            sy, sx  = torch.meshgrid(sy, sx, indexing='ij')
+            xy      = rearrange([sx,sy], 'c h w -> (h w) c')
+            xys.append(xy)
+            strides.append(torch.full((h*w,1), fill_value=stride, device=x.device))
+        return *pack(xys, '* c'), torch.cat(strides,0)
+    
+    def forward(self, xs, targets=None):
+        sxy, ps, strides = self.make_anchors(xs)
+        feats       = [rearrange(torch.cat((c1(x), c2(x)), 1), 'b f h w -> b (h w) f') for x,c1,c2 in zip(xs, self.cv2, self.cv3)]
+        dist, cls   = torch.cat(feats, 1).split((4 * self.reg_max, self.nc), -1)
+        dist        = rearrange(dist, 'b n (k r) -> b n k r', k=4)
+        lt, rb      = torch.einsum('bnkr, r -> bnk', dist.softmax(-1), self.r).chunk(2, 2)
+        x1y1        = sxy - lt*strides
+        x2y2        = sxy + rb*strides
+        box         = torch.cat([x1y1,x2y2],-1)
+        pred        = torch.cat((box, cls.sigmoid()), -1)
+
+        if exists(targets):
+            awh         = torch.full_like(sxy, fill_value=5.0) * strides # Fake height and width for the sake of ATSS
+            anchors     = torch.cat([sxy-awh/2, sxy+awh/2],-1)
+            tgts        = assigner.atss(anchors, targets, [p[0] for p in ps], self.nc, 9)
+            tgt_bbox    = tgts[...,:4]
+            tgt_scores  = tgts[...,4]
+            tgt_cls     = tgts[...,6:]
+            mask        = tgt_scores > 0
+
+            # CIOU loss (positive samples)
+            tgt_scores_sum = max(tgt_scores.sum(), 1)
+            weight   = tgt_scores[mask]
+            loss_iou = (torchvision.ops.complete_box_iou_loss(box[mask], tgt_bbox[mask], reduction='none') * weight).sum() / tgt_scores_sum
+
+            # DFL loss (positive samples)
+            loss_dfl = dfl_loss(tgt_bbox, mask, tgt_scores_sum, sxy, strides, dist)
+            
+            # Class loss (positive samples + negative)
+            loss_cls = F.binary_cross_entropy_with_logits(cls, tgt_cls*tgt_scores.unsqueeze(-1), reduction='none').sum() / tgt_scores_sum
+
+        return pred if not exists(targets) else (pred, {'iou': loss_iou, 'dfl': loss_dfl, 'cls': loss_cls})
+        
+class DetectV10(Detect):
+    def __init__(self, nc=80, ch=()):
+        super().__init__(nc, ch)
+        self.cv3 = nn.ModuleList(nn.Sequential(Conv(x, x, 3, g=x), 
+                                               Conv(x, self.c3, 1),
+                                               Conv(self.c3, self.c3, 3, g=self.c3), 
+                                               Conv(self.c3, self.c3, 1),
+                                               nn.Conv2d(self.c3, self.nc, 1)) for x in ch)
+
+        self.one2one_cv2 = deepcopy(self.cv2)
+        self.one2one_cv3 = deepcopy(self.cv3)
+        self.max_det = 100
+    
+    def forward(self, x):
+        # TODO: implement all the topk stuff. I think yolov10 doesn't need NMS. But you can you use it in inference mode for now.
+        return self.inference(self.forward_feat(x, self.one2one_cv2, self.one2one_cv3))
     
 class Yolov3(nn.Module):
     def __init__(self, nclasses, spp):
@@ -889,10 +888,10 @@ class Yolov8(nn.Module):
         self.fpn  = HeadV8(w, r, d)
         self.head = Detect(num_classes, ch=(int(256*w), int(512*w), int(512*w*r)))
 
-    def forward(self, x):
+    def forward(self, x, targets=None):
         x = self.net(x)
         x = self.fpn(*x)
-        return self.head(x)
+        return self.head(x, targets)
 
 class Yolov10(nn.Module):
     def __init__(self, variant, num_classes):

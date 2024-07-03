@@ -677,7 +677,7 @@ class DetectV3(nn.Module):
     
     def forward(self, xs, targets=None):
         sxy, ps, awh, strides, scales = self.make_anchors(xs)
-        feats           = list(map(lambda n,x: rearrange(n(x), 'b (a f) h w -> b (a h w) f', f=self.nc+5), self.cv, xs))
+        feats           = [rearrange(n(x), 'b (a f) h w -> b (a h w) f', f=self.nc+5) for x,n in zip(xs, self.cv)]
         xy, wh, l, cls  = torch.cat(feats,1).split((2,2,1,self.nc), -1) 
         xy              = strides * ((xy.sigmoid() - 0.5) * scales) + sxy
         wh              = self.to_wh(wh, awh)
@@ -698,7 +698,7 @@ class DetectV3(nn.Module):
             loss_iou = (torchvision.ops.complete_box_iou_loss(box[mask], tgt_bbox[mask], reduction='none') * weight).sum() / tgt_scores_sum
             
             # Class loss (positive samples)
-            loss_cls = F.binary_cross_entropy_with_logits(cls[mask], tgt_cls[mask], reduction='none').sum() / tgt_scores_sum
+            loss_cls = (F.binary_cross_entropy_with_logits(cls[mask], tgt_cls[mask], reduction='none') * weight).sum() / tgt_scores_sum
             
             # Objectness loss (positive + negative samples)
             l_obj       = l[mask].squeeze(-1)

@@ -8,23 +8,25 @@ namespace py = pybind11;
 using std::pow;
 using std::min;
 using std::max;
+using std::sqrt;
+using std::atan;
 using box = std::array<float,4>;
 
 constexpr float cx(const box& b)      { return 0.5 * (b[0] + b[2]); }
 constexpr float cy(const box& b)      { return 0.5 * (b[1] + b[3]); }
-constexpr float width(const box& b)   { return std::max(0.0f, b[2] - b[0]); }
-constexpr float height(const box& b)  { return std::max(0.0f, b[3] - b[1]); }
+constexpr float width(const box& b)   { return max(0.0f, b[2] - b[0]); }
+constexpr float height(const box& b)  { return max(0.0f, b[3] - b[1]); }
 constexpr float area(const box& b)    { return width(b) * height(b); }
 constexpr bool  contains(const box& b, const float cx, const float cy) { return cx >= b[0] && cx <= b[2] && cy >= b[1] && cy <= b[3]; }
 
 constexpr box inter(const box& b0, const box& b1) 
 { 
-    return {std::max(b0[0], b1[0]), std::max(b0[1], b1[1]), std::min(b0[2], b1[2]), std::min(b0[3], b1[3])};
+    return {max(b0[0], b1[0]), max(b0[1], b1[1]), min(b0[2], b1[2]), min(b0[3], b1[3])};
 }
 
 constexpr box convex(const box& b0, const box& b1)
 {
-    return {std::min(b0[0], b1[0]), std::min(b0[1], b1[1]), std::max(b0[2], b1[2]), std::max(b0[3], b1[3])};
+    return {min(b0[0], b1[0]), min(b0[1], b1[1]), max(b0[2], b1[2]), max(b0[3], b1[3])};
 }
 
 enum iou_type {IOU, GIOU, DIOU, CIOU};
@@ -46,14 +48,14 @@ constexpr float iou(const box& b0, const box& b1, const iou_type type = IOU, con
     if (type == GIOU)
         return iou_ - (c_area - union_) / (c_area + eps);
 
-    const float c2      = std::pow(cw, 2) + std::pow(ch, 2);
-    const float rho2    = std::pow(cx(b0) - cx(b1), 2) + std::pow(cy(b0) - cy(b1), 2);
+    const float c2      = pow(cw, 2) + pow(ch, 2);
+    const float rho2    = pow(cx(b0) - cx(b1), 2) + pow(cy(b0) - cy(b1), 2);
     const float diou_   = iou_ - rho2 / (c2 + eps);
 
     if (type == DIOU)
         return diou_;
 
-    const float v       = (4 / std::pow(M_PI, 2)) * std::pow(std::atan(width(b1)/height(b1)) - std::atan(width(b0)/height(b0)), 2);
+    const float v       = (4 / pow(M_PI, 2)) * pow(atan(width(b1)/height(b1)) - atan(width(b0)/height(b0)), 2);
     const float alpha   = v / (1 - iou_ + v + eps);
 
     return diou_ - alpha * v;
@@ -61,7 +63,7 @@ constexpr float iou(const box& b0, const box& b1, const iou_type type = IOU, con
 
 constexpr float dist(const box& b0, const box& b1)
 {
-    return std::sqrt(std::pow(cx(b0) - cx(b1), 2) + std::pow(cy(b0) - cy(b1), 2));
+    return sqrt(pow(cx(b0) - cx(b1), 2) + pow(cy(b0) - cy(b1), 2));
 }
 
 constexpr float centreness(const box& b, const float cx, const float cy)
@@ -70,7 +72,7 @@ constexpr float centreness(const box& b, const float cx, const float cy)
     const float right   = b[2] - cx;
     const float top     = cy - b[1];
     const float bottom  = b[3] - cy;
-    return std::sqrt((std::min(left,right) * std::min(top,bottom)) / (std::max(left,right) * std::max(top,bottom)));                
+    return sqrt((min(left,right) * min(top,bottom)) / (max(left,right) * max(top,bottom)));                
 }
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> atss_fcos (
@@ -81,22 +83,22 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> atss_fcos (
     long                topk     // Number of candidates per pyramic level
 )
 {
+    // Shapes
+    const auto [B, D, N] = std::make_tuple(targets.size(0), targets.size(1), anchors.size(0));
+
     // Store device for later then put everything on CPU
     auto device    = anchors.device();
     anchors        = anchors.to(torch::TensorOptions(torch::Device("cpu")));
     targets        = targets.to(torch::TensorOptions(torch::Device("cpu")));
 
-    // Accessors
-    auto anchors_a = anchors.accessor<float,2>();
-    auto targets_a = targets.accessor<float,3>();
-
-    // Shapes
-    const auto [B, D, N] = std::make_tuple(targets_a.size(0), targets_a.size(1), anchors_a.size(0));
-
     // Outputs 
     auto boxes      = torch::zeros({B, N, 4});
     auto scores     = torch::zeros({B, N});
     auto classes    = torch::zeros({B, N, nc});
+
+    // Accessors
+    auto anchors_a  = anchors.accessor<float,2>();
+    auto targets_a  = targets.accessor<float,3>();
     auto boxes_a    = boxes.accessor<float,3>();
     auto scores_a   = scores.accessor<float,2>();
     auto classes_a  = classes.accessor<float,3>();
@@ -153,10 +155,10 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> atss_fcos (
                 }
 
                 const float mu      = x / candidates.size();
-                const float stdev   = std::sqrt(x2 / candidates.size() - mu*mu);
+                const float stdev   = sqrt(x2 / candidates.size() - mu*mu);
                 const float thresh  = mu + stdev;
 
-                // 5. Add to targets2
+                // 4. Add to targets2
                 for (size_t i = 0 ; i < candidates.size() ; ++i)
                 {
                     const long n   = candidates[i];
@@ -192,6 +194,9 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> tal (
     float               beta
 )
 {
+    // Shapes
+    const auto [B, D, N, nc] = std::make_tuple(targets.size(0), targets.size(1), pred_scores.size(1), pred_scores.size(2));
+
     // Store device for later then put everything on CPU
     auto device    = pred_boxes.device();
     pred_boxes     = pred_boxes.to(torch::TensorOptions(torch::Device("cpu")));
@@ -199,22 +204,19 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> tal (
     sxy            = sxy.to(torch::TensorOptions(torch::Device("cpu")));
     targets        = targets.to(torch::TensorOptions(torch::Device("cpu")));
 
+    // Outputs 
+    auto boxes      = torch::zeros({B, N, 4});
+    auto scores     = torch::zeros({B, N});
+    auto classes    = torch::zeros({B, N, nc});
+
     // Accessors
     auto pred_boxes_a   = pred_boxes.accessor<float,3>();
     auto pred_scores_a  = pred_scores.accessor<float,3>();
     auto sxy_a          = sxy.accessor<float,2>();
     auto targets_a      = targets.accessor<float,3>();
-
-    // Shapes
-    const auto [B, D, N, nc] = std::make_tuple(targets_a.size(0), targets_a.size(1), pred_scores_a.size(1), pred_scores_a.size(2));
-
-    // Outputs 
-    auto boxes      = torch::zeros({B, N, 4});
-    auto scores     = torch::zeros({B, N});
-    auto classes    = torch::zeros({B, N, nc});
-    auto boxes_a    = boxes.accessor<float,3>();
-    auto scores_a   = scores.accessor<float,2>();
-    auto classes_a  = classes.accessor<float,3>();
+    auto boxes_a        = boxes.accessor<float,3>();
+    auto scores_a       = scores.accessor<float,2>();
+    auto classes_a      = classes.accessor<float,3>();
 
     // Temporaries
     std::vector<float>  metric(N);
@@ -247,7 +249,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> tal (
 
                 // 2. Select topk
                 std::iota(begin(indices), end(indices), 0);
-                std::partial_sort(begin(indices), begin(indices) + topk, end(indices), [&](long i, long j) {return metric[i] < metric[j];});
+                std::partial_sort(begin(indices), begin(indices) + topk, end(indices), [&](long i, long j) {return metric[i] > metric[j];});
 
                 // 3. Normalize by max(IOU) / max(t)
                 float max_iou       = std::numeric_limits<float>::lowest();
@@ -260,7 +262,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> tal (
                     max_metric  = max(max_metric, metric[n]);
                 }
 
-                // 4. Add to targets
+                // 4. Add to targets2
                 for (size_t i = 0 ; i < topk ; ++i)
                 {
                     const long n = indices[i];

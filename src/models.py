@@ -685,25 +685,22 @@ class DetectV3(nn.Module):
         pred            = torch.cat([box, l.sigmoid(), cls.sigmoid()], -1)
 
         if exists(targets):
-            anchors     = torch.cat([sxy-awh/2, sxy+awh/2],-1)
-            tgts        = assigner.atss(anchors, targets, [p[0] for p in ps], self.nc, 9)
-            tgt_bbox    = tgts[...,:4]
-            tgt_scores  = tgts[...,4]
-            tgt_cls     = tgts[...,6:]
-            mask        = tgt_scores > 0
+            anchors               = torch.cat([sxy-awh/2, sxy+awh/2],-1)
+            tboxes, tscores, tcls = assigner.atss(anchors, targets, [p[0] for p in ps], self.nc, 9)
+            mask                  = tscores > 0
 
             # CIOU loss (positive samples)
-            tgt_scores_sum = max(tgt_scores.sum(), 1)
-            weight   = tgt_scores[mask]
-            loss_iou = (torchvision.ops.complete_box_iou_loss(box[mask], tgt_bbox[mask], reduction='none') * weight).sum() / tgt_scores_sum
+            tgt_scores_sum = max(tscores.sum(), 1)
+            weight   = tscores[mask]
+            loss_iou = (torchvision.ops.complete_box_iou_loss(box[mask], tboxes[mask], reduction='none') * weight).sum() / tgt_scores_sum
             
             # Class loss (positive samples)
-            loss_cls = (F.binary_cross_entropy_with_logits(cls[mask], tgt_cls[mask], reduction='none') * weight).sum() / tgt_scores_sum
+            loss_cls = (F.binary_cross_entropy_with_logits(cls[mask], tcls[mask], reduction='none') * weight.unsqueeze(-1)).sum() / tgt_scores_sum
             
             # Objectness loss (positive + negative samples)
             l_obj       = l[mask].squeeze(-1)
             l_noobj     = l[~mask].squeeze(-1)
-            loss_obj    = F.binary_cross_entropy_with_logits(l_obj, tgt_scores[mask], reduction='none').sum() / tgt_scores_sum
+            loss_obj    = F.binary_cross_entropy_with_logits(l_obj, tscores[mask], reduction='none').sum() / tgt_scores_sum
             loss_noobj  = F.binary_cross_entropy_with_logits(l_noobj, torch.zeros_like(l_noobj), reduction='mean')
 
         return pred if not exists(targets) else (pred, {'iou': loss_iou, 'cls': loss_cls, 'obj': loss_obj, 'noobj': loss_noobj})
@@ -746,24 +743,21 @@ class Detect(nn.Module):
         pred        = torch.cat((box, cls.sigmoid()), -1)
 
         if exists(targets):
-            awh         = torch.full_like(sxy, fill_value=5.0) * strides # Fake height and width for the sake of ATSS
-            anchors     = torch.cat([sxy-awh/2, sxy+awh/2],-1)
-            tgts        = assigner.atss(anchors, targets, [p[0] for p in ps], self.nc, 9)
-            tgt_bbox    = tgts[...,:4]
-            tgt_scores  = tgts[...,4]
-            tgt_cls     = tgts[...,6:]
-            mask        = tgt_scores > 0
+            awh                     = torch.full_like(sxy, fill_value=5.0) * strides # Fake height and width for the sake of ATSS
+            anchors                 = torch.cat([sxy-awh/2, sxy+awh/2],-1)
+            tboxes, tscores, tcls   = assigner.atss(anchors, targets, [p[0] for p in ps], self.nc, 9)
+            mask                    = tscores > 0
 
             # CIOU loss (positive samples)
-            tgt_scores_sum = max(tgt_scores.sum(), 1)
-            weight   = tgt_scores[mask]
-            loss_iou = (torchvision.ops.complete_box_iou_loss(box[mask], tgt_bbox[mask], reduction='none') * weight).sum() / tgt_scores_sum
+            tgt_scores_sum = max(tscores.sum(), 1)
+            weight   = tscores[mask]
+            loss_iou = (torchvision.ops.complete_box_iou_loss(box[mask], tboxes[mask], reduction='none') * weight).sum() / tgt_scores_sum
 
             # DFL loss (positive samples)
-            loss_dfl = dfl_loss(tgt_bbox, mask, tgt_scores_sum, sxy, strides, dist)
+            loss_dfl = dfl_loss(tboxes, mask, tgt_scores_sum, sxy, strides, dist)
             
             # Class loss (positive samples + negative)
-            loss_cls = F.binary_cross_entropy_with_logits(cls, tgt_cls*tgt_scores.unsqueeze(-1), reduction='none').sum() / tgt_scores_sum
+            loss_cls = F.binary_cross_entropy_with_logits(cls, tcls*tscores.unsqueeze(-1), reduction='none').sum() / tgt_scores_sum
 
         return pred if not exists(targets) else (pred, {'iou': loss_iou, 'dfl': loss_dfl, 'cls': loss_cls})
         

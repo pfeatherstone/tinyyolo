@@ -254,21 +254,19 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> tal (
                     max_metric  = max(max_metric, metric[n]);
                 }
 
-                const float g = max_iou / max_metric;
-
                 // 4. Add to targets
                 for (size_t i = 0 ; i < topk ; ++i)
                 {
                     const long n = indices[i];
                     const box ba = {anchors_a[n][0], anchors_a[n][1], anchors_a[n][2], anchors_a[n][3]};
 
-                    if (contains(bt, cx(ba), cy(ba)))
+                    if (contains(bt, cx(ba), cy(ba)) && ious[n] > best_ious[n])
                     {
                         boxes_a[b][n][0]        = bt[0];                       
                         boxes_a[b][n][1]        = bt[1];
                         boxes_a[b][n][2]        = bt[2];
                         boxes_a[b][n][3]        = bt[3];
-                        scores_a[b][n]          = metric[n];
+                        scores_a[b][n]          = metric[n] * max_iou / max_metric;
                         classes_a[b][n][best_cls[n]] = 0; // Reset last class
                         classes_a[b][n][cls]    = 1;
                         best_ious[n]            = ious[n];

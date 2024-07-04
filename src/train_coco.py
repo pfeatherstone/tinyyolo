@@ -1,5 +1,6 @@
 import os
 import argparse
+from   PIL import ImageFile
 import torch
 import torch.nn.functional as F
 import torch.utils.data
@@ -9,7 +10,8 @@ import lightning.pytorch as pl
 from   lightning.pytorch.loggers import TensorBoardLogger
 from   lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor
 import matplotlib.pyplot as plt
-from   models import Yolov4Tiny, nms, COCO_NAMES
+from   models import Yolov8, Yolov3, nms, COCO_NAMES, load_from_ultralytics, load_darknet, init_batchnorms
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--nepochs",      type=int,   default=100,    help="Number of epochs")
@@ -107,11 +109,13 @@ class LitModule(pl.LightningModule):
     def step(self, batch, batch_idx, nbatches, is_training):
         imgs, targets = batch
         preds, losses = self.net(imgs, targets)
-        loss          = 3.54 * losses['iou'] + 37.4 * losses['cls'] + 10 * losses['obj'] + 100.0 * losses['noobj']
+        # loss          = 7.5 * losses['iou'] + 0.5 * losses['cls'] + 0.5 * losses['obj'] + 0.5 * losses['noobj']
+        loss          = 7.5 * losses['iou'] + 0.5 * losses['cls'] + 1.5 * losses['dfl']
 
         label = "train" if is_training else "val"
-        self.log("loss/obj/"   + label, losses['obj'].item(),   logger=False, prog_bar=False, on_step=True)
-        self.log("loss/noobj/" + label, losses['noobj'].item(), logger=False, prog_bar=False, on_step=True)
+        # self.log("loss/obj/"   + label, losses['obj'].item(),   logger=False, prog_bar=False, on_step=True)
+        # self.log("loss/noobj/" + label, losses['noobj'].item(), logger=False, prog_bar=False, on_step=True)
+        self.log("loss/dfl/"   + label, losses['dfl'].item(),   logger=False, prog_bar=False, on_step=True)
         self.log("loss/cls/"   + label, losses['cls'].item(),   logger=False, prog_bar=False, on_step=True)
         self.log("loss/iou/"   + label, losses['iou'].item(),   logger=False, prog_bar=False, on_step=True)
         self.log("loss/sum/"   + label, loss.item(),            logger=False, prog_bar=True, on_step=True, on_epoch=True)
@@ -121,17 +125,18 @@ class LitModule(pl.LightningModule):
             epoch       = self.current_epoch
             totalBatch  = (epoch + batch_idx / nbatches) * 1000
 
-            summary.add_scalars("loss/obj",   {label: losses['obj'].item()},   totalBatch)
-            summary.add_scalars("loss/noobj", {label: losses['noobj'].item()}, totalBatch)
+            # summary.add_scalars("loss/obj",   {label: losses['obj'].item()},   totalBatch)
+            # summary.add_scalars("loss/noobj", {label: losses['noobj'].item()}, totalBatch)
+            summary.add_scalars("loss/dfl",   {label: losses['dfl'].item()},   totalBatch)
             summary.add_scalars("loss/cls",   {label: losses['cls'].item()},   totalBatch)
             summary.add_scalars("loss/iou",   {label: losses['iou'].item()},   totalBatch)
             summary.add_scalars("loss/sum",   {label: loss.item()},            totalBatch)
 
             if batch_idx % 50 == 0:
                 with torch.no_grad():
-                    _, preds = nms(preds[0:1], 0.3, 0.5, True)
+                    _, preds = nms(preds[0:1], 0.3, 0.5, False)
                     img      = (imgs[0]*255).to(torch.uint8)
-                    canvas   = torchvision.utils.draw_bounding_boxes(img, preds[:,:4], [COCO_NAMES[i] for i in preds[:, 5:].argmax(-1).long()])
+                    canvas   = torchvision.utils.draw_bounding_boxes(img, preds[:,:4], [COCO_NAMES[i] for i in preds[:, -80:].argmax(-1).long()])
                     fig = plt.figure()
                     plt.imshow(canvas.permute(1,2,0).cpu())
                     summary.add_figure('preds/'+label, fig, totalBatch)
@@ -185,14 +190,15 @@ transforms = [
     v2.RandomPosterize(bits=4, p=0.7)
 ]
                                    
-trainset    = CocoWrapper(args.trainRoot, args.trainAnn, transforms=transforms)
+trainset    = CocoWrapper(args.trainRoot, args.trainAnn, transforms=[v2.Resize((640,640), antialias=True)])
 valset      = CocoWrapper(args.valRoot,   args.valAnn,   transforms=[v2.Resize((416,416), antialias=True)])
 nclasses    = len(valset.names)
 trainLoader = torch.utils.data.DataLoader(trainset, batch_size=args.batchsize, shuffle=True, collate_fn=CocoCollator, num_workers=args.nworkers)
 valLoader   = torch.utils.data.DataLoader(valset, batch_size=args.batchsize, collate_fn=CocoCollator, num_workers=args.nworkers)
 nsteps      = len(trainLoader) * args.nepochs
 
-net = Yolov4Tiny(nclasses)
+net = Yolov8('n', nclasses)
+init_batchnorms(net)
 net = LitModule(net, nsteps)
 
 trainer = pl.Trainer(max_epochs=args.nepochs,

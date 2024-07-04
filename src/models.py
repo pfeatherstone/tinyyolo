@@ -743,9 +743,10 @@ class Detect(nn.Module):
         pred        = torch.cat((box, cls.sigmoid()), -1)
 
         if exists(targets):
-            awh                     = torch.full_like(sxy, fill_value=5.0) * strides # Fake height and width for the sake of ATSS
-            anchors                 = torch.cat([sxy-awh/2, sxy+awh/2],-1)
-            tboxes, tscores, tcls   = assigner.atss(anchors, targets, [p[0] for p in ps], self.nc, 9)
+            # awh                     = torch.full_like(sxy, fill_value=5.0) * strides # Fake height and width for the sake of ATSS
+            # anchors                 = torch.cat([sxy-awh/2, sxy+awh/2],-1)
+            # tboxes, tscores, tcls   = assigner.atss(anchors, targets, [p[0] for p in ps], self.nc, 9)
+            tboxes, tscores, tcls   = assigner.tal(box, cls.sigmoid(), sxy, targets, 9, 0.5, 6.0)
             mask                    = tscores > 0
 
             # CIOU loss (positive samples)

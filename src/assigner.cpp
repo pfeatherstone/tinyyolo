@@ -81,27 +81,33 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> atss_fcos (
     long                topk     // Number of candidates per pyramic level
 )
 {
+    // Store device for later then put everything on CPU
     auto device    = anchors.device();
     anchors        = anchors.to(torch::TensorOptions(torch::Device("cpu")));
     targets        = targets.to(torch::TensorOptions(torch::Device("cpu")));
+
+    // Accessors
     auto anchors_a = anchors.accessor<float,2>();
     auto targets_a = targets.accessor<float,3>();
-    const long B    = targets_a.size(0);
-    const long D    = targets_a.size(1);
-    const long N    = anchors_a.size(0);
-    std::vector<float>  ious(ps.size()*topk);
-    std::vector<float>  dists(N);
-    std::vector<long>   indices;
-    std::vector<long>   candidates(ps.size()*topk);
-    std::vector<float>  best_ious(N);
-    std::vector<long>   best_cls(N);
 
+    // Shapes
+    const auto [B, D, N] = std::make_tuple(targets_a.size(0), targets_a.size(1), anchors_a.size(0));
+
+    // Outputs 
     auto boxes      = torch::zeros({B, N, 4});
     auto scores     = torch::zeros({B, N});
     auto classes    = torch::zeros({B, N, nc});
     auto boxes_a    = boxes.accessor<float,3>();
     auto scores_a   = scores.accessor<float,2>();
     auto classes_a  = classes.accessor<float,3>();
+
+    // Temporaries
+    std::vector<float>  ious(ps.size()*topk);
+    std::vector<float>  dists(N);
+    std::vector<long>   indices;
+    std::vector<long>   candidates(ps.size()*topk);
+    std::vector<float>  best_ious(N);
+    std::vector<long>   best_cls(N);
 
     for (long b = 0 ; b < B ; ++b)
     {
@@ -113,14 +119,14 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> atss_fcos (
         {
             if (targets_a[b][d][4] > -1)
             {
-                const box bt = {targets_a[b][d][0], targets_a[b][d][1], targets_a[b][d][2], targets_a[b][d][3]};
-                const int cls = targets_a[b][d][4];
+                const box tbox = {targets_a[b][d][0], targets_a[b][d][1], targets_a[b][d][2], targets_a[b][d][3]};
+                const int tcls = targets_a[b][d][4];
 
                 // 1. Calculate L2s
                 for (long n = 0 ; n < N ; ++n)
                 {
-                    const box ba = {anchors_a[n][0], anchors_a[n][1], anchors_a[n][2], anchors_a[n][3]};
-                    dists[n] = dist(ba, bt);
+                    const box abox = {anchors_a[n][0], anchors_a[n][1], anchors_a[n][2], anchors_a[n][3]};
+                    dists[n] = dist(abox, tbox);
                 }
 
                 // 2. Select topk from each level
@@ -139,9 +145,9 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> atss_fcos (
                 float x2 = 0.0f;
                 for (size_t i = 0 ; i < candidates.size() ; ++i)
                 {
-                    const long n = candidates[i];
-                    const box ba = {anchors_a[n][0], anchors_a[n][1], anchors_a[n][2], anchors_a[n][3]};
-                    ious[i] = iou(ba, bt, CIOU);
+                    const long n   = candidates[i];
+                    const box abox = {anchors_a[n][0], anchors_a[n][1], anchors_a[n][2], anchors_a[n][3]};
+                    ious[i] = iou(abox, tbox, CIOU);
                     x  += ious[i];
                     x2 += ious[i] * ious[i];
                 }
@@ -153,20 +159,20 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> atss_fcos (
                 // 5. Add to targets2
                 for (size_t i = 0 ; i < candidates.size() ; ++i)
                 {
-                    const long n = candidates[i];
-                    const box ba = {anchors_a[n][0], anchors_a[n][1], anchors_a[n][2], anchors_a[n][3]};
+                    const long n   = candidates[i];
+                    const box abox = {anchors_a[n][0], anchors_a[n][1], anchors_a[n][2], anchors_a[n][3]};
                     
-                    if (ious[i] > thresh && contains(bt, cx(ba), cy(ba)) && ious[i] > best_ious[n])
+                    if (ious[i] > thresh && contains(tbox, cx(abox), cy(abox)) && ious[i] > best_ious[n])
                     {     
-                        boxes_a[b][n][0]        = bt[0];                       
-                        boxes_a[b][n][1]        = bt[1];
-                        boxes_a[b][n][2]        = bt[2];
-                        boxes_a[b][n][3]        = bt[3];
-                        scores_a[b][n]          = centreness(bt, cx(ba), cy(ba));
+                        boxes_a[b][n][0]        = tbox[0];                       
+                        boxes_a[b][n][1]        = tbox[1];
+                        boxes_a[b][n][2]        = tbox[2];
+                        boxes_a[b][n][3]        = tbox[3];
+                        scores_a[b][n]          = centreness(tbox, cx(abox), cy(abox));
                         classes_a[b][n][best_cls[n]] = 0; // Reset last class
-                        classes_a[b][n][cls]    = 1;
+                        classes_a[b][n][tcls]   = 1;
                         best_ious[n]            = ious[i];
-                        best_cls[n]             = cls;
+                        best_cls[n]             = tcls;
                     }
                 }
             }
@@ -258,19 +264,18 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> tal (
                 for (size_t i = 0 ; i < topk ; ++i)
                 {
                     const long n = indices[i];
-                    const box ba = {anchors_a[n][0], anchors_a[n][1], anchors_a[n][2], anchors_a[n][3]};
 
-                    if (contains(bt, cx(ba), cy(ba)) && ious[n] > best_ious[n])
+                    if (contains(tbox, sxy_a[n][0], sxy_a[n][1]) && ious[n] > best_ious[n])
                     {
-                        boxes_a[b][n][0]        = bt[0];                       
-                        boxes_a[b][n][1]        = bt[1];
-                        boxes_a[b][n][2]        = bt[2];
-                        boxes_a[b][n][3]        = bt[3];
+                        boxes_a[b][n][0]        = tbox[0];                       
+                        boxes_a[b][n][1]        = tbox[1];
+                        boxes_a[b][n][2]        = tbox[2];
+                        boxes_a[b][n][3]        = tbox[3];
                         scores_a[b][n]          = metric[n] * max_iou / max_metric;
                         classes_a[b][n][best_cls[n]] = 0; // Reset last class
-                        classes_a[b][n][cls]    = 1;
+                        classes_a[b][n][tcls]   = 1;
                         best_ious[n]            = ious[n];
-                        best_cls[n]             = cls;
+                        best_cls[n]             = tcls;
                     }
                 }
             }

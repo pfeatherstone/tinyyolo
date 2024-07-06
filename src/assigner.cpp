@@ -3,13 +3,9 @@
 #include <limits>
 #include <torch/extension.h>
 
+using namespace std;
 namespace py = pybind11;
 
-using std::pow;
-using std::min;
-using std::max;
-using std::sqrt;
-using std::atan;
 using box = std::array<float,4>;
 
 constexpr float cx(const box& b)      { return 0.5 * (b[0] + b[2]); }
@@ -75,12 +71,84 @@ constexpr float centreness(const box& b, const float cx, const float cy)
     return sqrt((min(left,right) * min(top,bottom)) / (max(left,right) * max(top,bottom)));                
 }
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> atss_fcos (
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> fcos (
+    torch::Tensor       sxy,     // [N, 2]
+    torch::Tensor       targets, // [B, D, 5]
+    const long          nc
+)
+{
+    // Shapes
+    const auto [B, D, N] = std::make_tuple(targets.size(0), targets.size(1), sxy.size(0));
+
+    // Store device for later then put everything on CPU
+    auto device = sxy.device();
+    sxy         = sxy.to(torch::TensorOptions(torch::Device("cpu")));
+    targets     = targets.to(torch::TensorOptions(torch::Device("cpu")));
+
+    // Outputs 
+    auto boxes      = torch::zeros({B, N, 4});
+    auto scores     = torch::zeros({B, N});
+    auto classes    = torch::zeros({B, N, nc});
+
+    // Accessors
+    auto sxy_a      = sxy.accessor<float,2>();
+    auto targets_a  = targets.accessor<float,3>();
+    auto boxes_a    = boxes.accessor<float,3>();
+    auto scores_a   = scores.accessor<float,2>();
+    auto classes_a  = classes.accessor<float,3>();
+
+    // Temporaries
+    std::vector<float>  best_centreness(N);
+    std::vector<long>   best_cls(N);
+
+    for (long b = 0 ; b < B ; ++b)
+    {
+        // Running track of best IOU and best class for an anchor point
+        std::fill(begin(best_centreness), end(best_centreness), 0.0f);
+        std::fill(begin(best_cls), end(best_cls), 0);
+
+        for (long d = 0 ; d < D ; ++d)
+        {
+            if (targets_a[b][d][4] > -1)
+            {
+                const box tbox = {targets_a[b][d][0], targets_a[b][d][1], targets_a[b][d][2], targets_a[b][d][3]};
+                const int tcls = targets_a[b][d][4];
+
+                // 1. Find all anchor points inside gt box and assign score to centreness. 
+                // 2. If anchor point is ambiguous, pick gt which greater centress
+                for (long n = 0 ; n < N ; ++n)
+                {
+                    if (contains(tbox, sxy_a[n][0], sxy_a[n][1]))
+                    {
+                        const float centreness_ = centreness(tbox, sxy_a[n][0], sxy_a[n][1]);
+
+                        if (centreness_ > best_centreness[n])
+                        {
+                            boxes_a[b][n][0]        = tbox[0];                       
+                            boxes_a[b][n][1]        = tbox[1];
+                            boxes_a[b][n][2]        = tbox[2];
+                            boxes_a[b][n][3]        = tbox[3];
+                            scores_a[b][n]          = centreness_;
+                            classes_a[b][n][best_cls[n]] = 0; // Reset last class
+                            classes_a[b][n][tcls]   = 1;
+                            best_centreness[n]      = centreness_;
+                            best_cls[n]             = tcls;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return std::make_tuple(boxes.to(device), scores.to(device), classes.to(device));
+}
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> atss (
     torch::Tensor       anchors, // [N, 4]
     torch::Tensor       targets, // [B, D, 5]
     std::vector<long>   ps,      // [3]
-    long                nc,      // Number of classes
-    long                topk     // Number of candidates per pyramic level
+    const long          nc,      // Number of classes
+    const long          topk     // Number of candidates per pyramic level
 )
 {
     // Shapes
@@ -189,9 +257,9 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> tal (
     torch::Tensor       pred_scores,    // [B, N, nc]
     torch::Tensor       sxy,            // [N, 2]
     torch::Tensor       targets,        // [B, D, 5]
-    long                topk,           // Number of candidates per pyramic level
-    float               alpha,
-    float               beta
+    const long          topk,           // Number of candidates per pyramic level
+    const float         alpha,
+    const float         beta
 )
 {
     // Shapes
@@ -288,6 +356,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> tal (
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("atss", &atss_fcos, "ATSS assigner");
-    m.def("tal",  &tal,       "TAL assigner");
+    m.def("fcos", &fcos, "FCOS assigner");
+    m.def("atss", &atss, "ATSS assigner");
+    m.def("tal",  &tal,  "TAL assigner");
 }

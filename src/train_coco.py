@@ -156,7 +156,6 @@ net = LitModule(net, nsteps)
 
 trainer = pl.Trainer(max_epochs=args.nepochs,
                      accelerator='gpu',
-                     devices=[1],
                      num_sanity_val_steps=0,
                      logger=TensorBoardLogger(save_dir="../runs", flush_secs=10),
                      callbacks= [LearningRateMonitor(logging_interval='step', log_momentum=True),

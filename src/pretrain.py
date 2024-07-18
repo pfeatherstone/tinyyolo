@@ -96,7 +96,7 @@ trainer = pl.Trainer(max_epochs=args.nepochs,
                      logger=TensorBoardLogger(save_dir="../runs", flush_secs=10),
                      callbacks= [LearningRateMonitor(logging_interval='step', log_momentum=True),
                                  ModelCheckpoint(filename='epoch_{epoch}-loss_{loss/val_epoch}',
-                                                 monitor='loss/sum/val_epoch', 
+                                                 monitor='loss/val_epoch', 
                                                  auto_insert_metric_name=False)])
 
 trainer.fit(model=net, train_dataloaders=trainset, val_dataloaders=valset)

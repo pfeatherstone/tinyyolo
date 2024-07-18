@@ -48,7 +48,7 @@ class LitModule(pl.LightningModule):
         loss, cross = barlow_loss(z1, z2, 5e-3)
 
         label = "train" if is_training else "val"
-        self.log("loss/" + label, loss.item(), logger=False, on_step=True, on_epoch=not is_training)
+        self.log("loss/" + label, loss.item(), logger=False, sync_dist=True, on_step=True, on_epoch=not is_training)
 
         if self.trainer.is_global_zero:
             summary     = self.logger.experiment
@@ -91,7 +91,6 @@ net = LitModule(net, nsteps)
 
 trainer = pl.Trainer(max_epochs=args.nepochs,
                      accelerator='gpu',
-                     devices=[1],
                      num_sanity_val_steps=0,
                      logger=TensorBoardLogger(save_dir="../runs", flush_secs=10),
                      callbacks= [LearningRateMonitor(logging_interval='step', log_momentum=True),

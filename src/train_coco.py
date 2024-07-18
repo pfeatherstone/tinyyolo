@@ -1,4 +1,3 @@
-import os
 import argparse
 from   PIL import ImageFile
 import torch
@@ -137,9 +136,10 @@ torch.set_float32_matmul_precision('medium')
 
 transforms = [
     v2.RandomPhotometricDistort(p=0.7),
-    v2.RandomApply([v2.ColorJitter(brightness=(0.5,1.5),contrast=(1),saturation=(0.5,1.5))], p=0.7),
+    v2.RandomGrayscale(p=0.3),
     v2.RandomPosterize(bits=4, p=0.7),
     v2.RandomHorizontalFlip(p=0.7),
+    v2.RandomPerspective(distortion_scale=0.6, p=0.5),
     v2.Resize((640,640), antialias=True)
 ]
                                    

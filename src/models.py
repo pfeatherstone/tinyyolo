@@ -9,7 +9,7 @@ import torchvision
 from   torch.utils.cpp_extension import load
 from   einops import rearrange, repeat, pack, unpack
 
-assigner = load(name="assigner", sources=["assigner.cpp"], extra_cflags=["-O3", "-ffast-math", "-march=native", "-std=c++20"], verbose=True)
+assigner = load(name="assigner", sources=["assigner.cpp"], extra_cflags=["-O3", "-ffast-math", "-march=native", "-std=c++20", "-fopenmp"], verbose=True)
 
 COCO_NAMES = [
     'person',           'bicycle',      'car',          'motorbike',    'aeroplane',    
@@ -685,8 +685,9 @@ class DetectV3(nn.Module):
         pred            = torch.cat([box, l.sigmoid(), cls.sigmoid()], -1)
 
         if exists(targets):
-            anchors               = torch.cat([sxy-awh/2, sxy+awh/2],-1)
-            tboxes, tscores, tcls = assigner.atss(anchors, targets, [p[0] for p in ps], self.nc, 9)
+            # anchors               = torch.cat([sxy-awh/2, sxy+awh/2],-1)
+            # tboxes, tscores, tcls = assigner.atss(anchors, targets, [p[0] for p in ps], self.nc, 9)
+            tboxes, tscores, tcls = assigner.tal(box, cls.sigmoid(), sxy, targets, 9, 0.5, 6.0)
             mask                  = tscores > 0
 
             # CIOU loss (positive samples)
@@ -747,6 +748,7 @@ class Detect(nn.Module):
             # anchors                 = torch.cat([sxy-awh/2, sxy+awh/2],-1)
             # tboxes, tscores, tcls   = assigner.atss(anchors, targets, [p[0] for p in ps], self.nc, 9)
             tboxes, tscores, tcls   = assigner.tal(box, cls.sigmoid(), sxy, targets, 9, 0.5, 6.0)
+            # tboxes, tscores, tcls   = assigner.fcos(sxy, targets, self.nc)
             mask                    = tscores > 0
 
             # CIOU loss (positive samples)
@@ -983,3 +985,31 @@ def nms(preds: torch.Tensor, conf_thresh: float, nms_thresh: float , has_objectn
     preds   = preds[nms]
     batch   = batch[nms]
     return batch, preds
+
+class BarlowTwinsHead(nn.Module):
+    def __init__(self, backbone, input_dim, hidden_dim=2048, output_dim=128):
+        self.net  = backbone
+        self.proj = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim, bias=True),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, output_dim, bias=False),
+        )
+
+    def forward(self, x):
+        x = self.net(x)[-1]
+        x = x.mean(2)
+        x = self.proj(x)
+        return x
+    
+def barlow_loss(z1, z2, lambda_coeff):
+    def off_diagonal(C):
+        n, m = C.shape
+        assert n == m, "tensors Za and Zb should have shape [B,D] and C should have shape [D,D]"
+        return C.flatten()[:-1].view(n - 1, n + 1)[:, 1:].flatten()
+    
+    z1, z2      = map(lambda z: (z - z.mean(0)) / z.std(0))
+    cross       = (z1.T @ z2) / z1.shape[0]
+    on_diag     = torch.diagonal(cross).add_(-1).pow_(2).sum()
+    off_diag    = off_diagonal(cross).pow_(2).sum()
+    return on_diag + lambda_coeff * off_diag

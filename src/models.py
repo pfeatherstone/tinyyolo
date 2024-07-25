@@ -699,12 +699,9 @@ class DetectV3(nn.Module):
             loss_cls = (F.binary_cross_entropy_with_logits(cls[mask], tcls[mask], reduction='none') * weight.unsqueeze(-1)).sum() / tgt_scores_sum
             
             # Objectness loss (positive + negative samples)
-            l_obj       = l[mask].squeeze(-1)
-            l_noobj     = l[~mask].squeeze(-1)
-            loss_obj    = F.binary_cross_entropy_with_logits(l_obj, tscores[mask], reduction='none').sum() / tgt_scores_sum
-            loss_noobj  = F.binary_cross_entropy_with_logits(l_noobj, torch.zeros_like(l_noobj), reduction='mean')
+            loss_obj = F.binary_cross_entropy_with_logits(l.squeeze(-1), tscores, reduction='sum') / tgt_scores_sum
 
-        return pred if not exists(targets) else (pred, {'iou': loss_iou, 'cls': loss_cls, 'obj': loss_obj, 'noobj': loss_noobj})
+        return pred if not exists(targets) else (pred, {'iou': loss_iou, 'cls': loss_cls, 'obj': loss_obj})
 
 class Detect(nn.Module):
     def __init__(self, nc=80, ch=()):

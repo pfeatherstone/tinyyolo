@@ -76,9 +76,10 @@ def createOptimizer(self: torch.nn.Module, momentum=0.9, lr=0.001, decay=0.0001)
     return optimizer
 
 class LitModule(pl.LightningModule):
-    def __init__(self, net, nsteps):
+    def __init__(self, net, nc, nsteps):
         super().__init__()
         self.net = net
+        self.nc  = nc
         self.nsteps = nsteps
 
     def training_step(self, batch, batch_idx):
@@ -90,13 +91,12 @@ class LitModule(pl.LightningModule):
     def step(self, batch, batch_idx, nbatches, is_training):
         imgs, targets = batch
         preds, losses = self.net(imgs, targets)
-        # loss          = 7.5 * losses['iou'] + 0.5 * losses['cls'] + 0.5 * losses['obj'] + 0.5 * losses['noobj']
-        loss          = 7.5 * losses['iou'] + 0.5 * losses['cls'] + 1.5 * losses['dfl']
+        loss          = 7.5 * losses['iou'] + 0.5 * losses['cls'] + 0.5 * losses['obj']
+        # loss          = 7.5 * losses['iou'] + 0.5 * losses['cls'] + 1.5 * losses['dfl']
 
         label = "train" if is_training else "val"
-        # self.log("loss/obj/"   + label, losses['obj'].item(),   logger=False, prog_bar=False, on_step=True)
-        # self.log("loss/noobj/" + label, losses['noobj'].item(), logger=False, prog_bar=False, on_step=True)
-        self.log("loss/dfl/"   + label, losses['dfl'].item(),   logger=False, prog_bar=False, on_step=True)
+        self.log("loss/obj/"   + label, losses['obj'].item(),   logger=False, prog_bar=False, on_step=True)
+        # self.log("loss/dfl/"   + label, losses['dfl'].item(),   logger=False, prog_bar=False, on_step=True)
         self.log("loss/cls/"   + label, losses['cls'].item(),   logger=False, prog_bar=False, on_step=True)
         self.log("loss/iou/"   + label, losses['iou'].item(),   logger=False, prog_bar=False, on_step=True)
         self.log("loss/sum/"   + label, loss.item(),            logger=False, prog_bar=True, on_step=True, on_epoch=True)
@@ -106,18 +106,19 @@ class LitModule(pl.LightningModule):
             epoch       = self.current_epoch
             totalBatch  = (epoch + batch_idx / nbatches) * 1000
 
-            # summary.add_scalars("loss/obj",   {label: losses['obj'].item()},   totalBatch)
-            # summary.add_scalars("loss/noobj", {label: losses['noobj'].item()}, totalBatch)
-            summary.add_scalars("loss/dfl",   {label: losses['dfl'].item()},   totalBatch)
+            summary.add_scalars("loss/obj",   {label: losses['obj'].item()},   totalBatch)
+            # summary.add_scalars("loss/dfl",   {label: losses['dfl'].item()},   totalBatch)
             summary.add_scalars("loss/cls",   {label: losses['cls'].item()},   totalBatch)
             summary.add_scalars("loss/iou",   {label: losses['iou'].item()},   totalBatch)
             summary.add_scalars("loss/sum",   {label: loss.item()},            totalBatch)
 
             if batch_idx % 50 == 0:
                 with torch.no_grad():
-                    _, preds = nms(preds[0:1], 0.3, 0.5, False)
+                    nfeats   = preds.shape[-1]
+                    has_obj  = (nfeats - 4 - self.nc) > 0
+                    _, preds = nms(preds[0:1], 0.3, 0.5, has_obj)
                     img      = (imgs[0]*255).to(torch.uint8)
-                    canvas   = torchvision.utils.draw_bounding_boxes(img, preds[:,:4], [COCO_NAMES[i] for i in preds[:, -80:].argmax(-1).long()])
+                    canvas   = torchvision.utils.draw_bounding_boxes(img, preds[:,:4], [COCO_NAMES[i] for i in preds[:, -self.nc:].argmax(-1).long()])
                     fig = plt.figure()
                     plt.imshow(canvas.permute(1,2,0).cpu())
                     summary.add_figure('preds/'+label, fig, totalBatch)
@@ -150,9 +151,10 @@ trainLoader = torch.utils.data.DataLoader(trainset, batch_size=args.batchsize, s
 valLoader   = torch.utils.data.DataLoader(valset, batch_size=args.batchsize, collate_fn=CocoCollator, num_workers=args.nworkers)
 nsteps      = len(trainLoader) * args.nepochs
 
-net = Yolov8('m', nclasses)
-init_batchnorms(net)
-net = LitModule(net, nsteps)
+# net = Yolov8('m', nclasses)
+# init_batchnorms(net)
+net = Yolov3Tiny(nclasses)
+net = LitModule(net, nclasses, nsteps)
 
 trainer = pl.Trainer(max_epochs=args.nepochs,
                      accelerator='gpu',

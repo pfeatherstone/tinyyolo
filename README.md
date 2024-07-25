@@ -48,5 +48,5 @@ If you like tiny code, Pytorch and Yolo, then you'll like TinyYolo.
 
 ## TODO ##
 
-- [] Train everything (probably going to need some cloud compute (help))
-- [] API docs + examples
+- [ ] Train everything (probably going to need some cloud compute (help))
+- [ ] API docs + examples

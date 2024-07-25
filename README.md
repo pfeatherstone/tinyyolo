@@ -49,4 +49,9 @@ If you like tiny code, Pytorch and Yolo, then you'll like TinyYolo.
 ## TODO ##
 
 - [ ] Train everything (probably going to need some cloud compute (help))
-- [ ] API docs + examples
+- [ ] Train with mixed precision
+- [ ] API docs + examples (in README)
+- [ ] Add examples for ONNX export, TFLITE export.
+- [ ] Explore how to compile models. Try TVM, onnx-mlir, TinyGrad (export to ONNX, load into tinygrad, then export LLVM or C code then compile)
+- [ ] Add Yolov6
+- [ ] Maybe add Yolov9

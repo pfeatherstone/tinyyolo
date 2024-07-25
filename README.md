@@ -45,3 +45,8 @@ If you like tiny code, Pytorch and Yolo, then you'll like TinyYolo.
 ## Observations ##
 
 * All the ultralytics models and Yolov7 use `eps=0.001` and `momentum=0.03` in `nn.Batchnorm2d`. That's unusual. I wonder what effects that has on training.
+
+## TODO ##
+
+- [] Train everything (probably going to need some cloud compute (help))
+- [] API docs + examples

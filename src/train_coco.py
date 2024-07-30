@@ -58,21 +58,28 @@ def CocoCollator(batch):
     return imgs, targets
 
 def createOptimizer(self: torch.nn.Module, momentum=0.9, lr=0.001, decay=0.0001):
-    param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
-    # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
-    # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
-    decay_params    = [p for n, p in param_dict.items() if p.dim() >= 2]
-    nodecay_params  = [p for n, p in param_dict.items() if p.dim() < 2]
-    assert len(decay_params) + len(nodecay_params) == len(list(filter(lambda p: p.requires_grad, self.parameters()))), "bad split"
-    optim_groups = [
-        {'params': decay_params,   'weight_decay': decay},
-        {'params': nodecay_params, 'weight_decay': 0.0}
-    ]
-    num_decay_params    = sum(p.numel() for p in decay_params)
-    num_nodecay_params  = sum(p.numel() for p in nodecay_params)
-    print(f"num decayed parameter tensors       : {len(decay_params)}, with {num_decay_params:,} parameters")
-    print(f"num non-decayed parameter tensors   : {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
-    optimizer = torch.optim.AdamW(optim_groups, lr=lr, betas=(momentum, 0.999), fused=True)
+    bn = tuple(v for k, v in nn.__dict__.items() if "Norm" in k)  # normalization layers
+    g  = [], [], []
+    for module_name, module in self.named_modules():
+        for param_name, param in module.named_parameters(recurse=False):
+            fullname = f"{module_name}.{param_name}" if module_name else param_name
+            if "bias" in fullname:  
+                g[2].append(param) # bias (no decay)
+            elif isinstance(module, bn):  
+                g[1].append(param) # weight (no decay)
+            else:  
+                g[0].append(param) # weight (with decay)
+    num_non_decayed_biases  = sum(p.numel() for p in g[2])
+    num_non_decayed_weights = sum(p.numel() for p in g[1])
+    num_decayed_weights     = sum(p.numel() for p in g[0])
+    print(f"num non-decayed biases  : {len(g[2])}, with {num_non_decayed_biases} parameters")
+    print(f"num non-decayed weights : {len(g[1])}, with {num_non_decayed_weights} parameters")
+    print(f"num decayed weights     : {len(g[0])}, with {num_decayed_weights} parameters")
+    assert num_non_decayed_biases + num_non_decayed_weights + num_decayed_weights == sum(p.numel() for p in self.parameters() if p.requires_grad)
+    optimizer = torch.optim.SGD(g[2], lr=lr, momentum=momentum, nesterov=True)
+    # optimizer = torch.optim.AdamW(g[2], lr=lr, betas=(momentum, 0.999), fused=True)
+    optimizer.add_param_group({"params": g[0], "weight_decay": decay})  # add g0 with weight_decay
+    optimizer.add_param_group({"params": g[1], "weight_decay": 0.0})  # add g1 (BatchNorm2d weights)
     return optimizer
 
 class LitModule(pl.LightningModule):
@@ -128,7 +135,7 @@ class LitModule(pl.LightningModule):
     def configure_optimizers(self):
         optimizer = createOptimizer(self, lr=args.lr)
         scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, 
-                                                        max_lr=args.lr, 
+                                                        max_lr=[g['lr'] for g in optimizer.param_groups], 
                                                         total_steps=self.nsteps,
                                                         pct_start=args.nwarmup/self.nsteps)
         return {'optimizer': optimizer, 'lr_scheduler': {'scheduler': scheduler, 'interval': "step", "frequency": 1}}
@@ -151,9 +158,8 @@ trainLoader = torch.utils.data.DataLoader(trainset, batch_size=args.batchsize, s
 valLoader   = torch.utils.data.DataLoader(valset, batch_size=args.batchsize, collate_fn=CocoCollator, num_workers=args.nworkers)
 nsteps      = len(trainLoader) * args.nepochs
 
-# net = Yolov8('m', nclasses)
-# init_batchnorms(net)
-net = Yolov3Tiny(nclasses)
+net = Yolov3(nclasses, spp=True)
+init_batchnorms(net)
 net = LitModule(net, nclasses, nsteps)
 
 trainer = pl.Trainer(max_epochs=args.nepochs,

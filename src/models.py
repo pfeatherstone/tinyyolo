@@ -757,7 +757,7 @@ class Detect(nn.Module):
             loss_dfl = dfl_loss(tboxes, mask, tgt_scores_sum, sxy, strides, dist)
             
             # Class loss (positive samples + negative)
-            loss_cls = F.binary_cross_entropy_with_logits(cls, tcls*tscores.unsqueeze(-1), reduction='none').sum() / tgt_scores_sum
+            loss_cls = F.binary_cross_entropy_with_logits(cls, tcls*tscores.unsqueeze(-1), reduction='sum') / tgt_scores_sum
 
         return pred if not exists(targets) else (pred, {'iou': loss_iou, 'dfl': loss_dfl, 'cls': loss_cls})
         

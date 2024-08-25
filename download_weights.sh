@@ -1,4 +1,3 @@
-
 mkdir weights
 wget https://pjreddie.com/media/files/yolov3-tiny.weights -P weights
 wget https://pjreddie.com/media/files/yolov3.weights -P weights
@@ -30,3 +29,26 @@ echo "torch.save(torch.load('yolov7.pt', map_location='cpu')['model'].float().st
 python3 script.py
 cd ..
 rm -rf yolov7
+
+git clone https://github.com/meituan/YOLOv6
+cd YOLOv6
+
+echo "import sys" >> script.py
+echo "import torch" >> script.py
+echo "d = torch.load(sys.argv[1], map_location='cpu')" >> script.py
+# echo "f = open('model.txt', 'w')" >> script.py
+# echo "f.write(str(d['model']))" >> script.py
+# echo "f.close()" >> script.py
+echo "torch.save(d['model'].state_dict(), f'../weights/{sys.argv[1]}')" >> script.py
+
+wget https://github.com/meituan/YOLOv6/releases/download/0.4.0/yolov6n.pt
+python3 script.py yolov6n.pt
+wget https://github.com/meituan/YOLOv6/releases/download/0.4.0/yolov6s.pt
+python3 script.py yolov6s.pt
+wget https://github.com/meituan/YOLOv6/releases/download/0.4.0/yolov6m.pt
+python3 script.py yolov6m.pt
+wget https://github.com/meituan/YOLOv6/releases/download/0.4.0/yolov6l.pt
+python3 script.py yolov6l.pt
+
+cd ..
+rm -rf YOLOv6

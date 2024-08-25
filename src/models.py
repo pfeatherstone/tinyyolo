@@ -9,7 +9,7 @@ import torchvision
 from   torch.utils.cpp_extension import load
 from   einops import rearrange, repeat, pack, unpack
 
-assigner = load(name="assigner", sources=["assigner.cpp"], extra_cflags=["-O3", "-ffast-math", "-march=native", "-std=c++20", "-fopenmp"], verbose=True)
+assigner = load(name="assigner", sources=["assigner.cpp"], extra_cflags=["-O3", "-ffast-math", "-march=native", "-std=c++20"], verbose=True)
 
 COCO_NAMES = [
     'person',           'bicycle',      'car',          'motorbike',    'aeroplane',    
@@ -45,6 +45,10 @@ def get_variant_multiplesV5(variant: str):
         case 'm': return (0.67, 0.75, 2.0) 
         case 'l': return (1.00, 1.00, 2.0) 
         case 'x': return (1.33, 1.25, 2.0)
+
+def get_variant_multiplesV6(variant: str):
+    match variant:
+        case 'n': return (0.33, 0.25)
 
 def get_variant_multiplesV8(variant: str):
     match variant:
@@ -184,15 +188,38 @@ class RepVGGDW(torch.nn.Module):
         return F.silu(self.conv(x) + self.conv1(x), inplace=True)
 
 class RepConv(nn.Module):
-    def __init__(self, c1, c2):
+    def __init__(self, c1, c2, s=1, act=F.silu):
         super().__init__()
-        self.c1 = Conv(c1, c2, 3, act=nn.Identity())
-        self.c2 = Conv(c1, c2, 1, act=nn.Identity())
-        self.bn = nn.BatchNorm2d(c1) if c1==c2 else None
+        self.c1 = Conv(c1, c2, k=3, s=s, act=nn.Identity())
+        self.c2 = Conv(c1, c2, k=1, s=s, act=nn.Identity())
+        self.bn = nn.BatchNorm2d(c1) if c1==c2 and s==1 else None
+        self.act = act
+
     def forward(self, x):
         id_out = self.bn(x) if exists(self.bn) else 0
-        return F.silu(self.c1(x) + self.c2(x) + id_out, inplace=True)
+        return self.act(self.c1(x) + self.c2(x) + id_out, inplace=True)
 
+class BottleRep(nn.Module):
+    def __init__(self, c1, c2, basic_block=partial(RepConv, act=F.relu), weight=False):
+        super().__init__()
+        self.conv1 = basic_block(c1, c2)
+        self.conv2 = basic_block(c1, c2)
+        self.add   = c1==c2
+        self.alpha = nn.Parameter(torch.ones(1)) if weight else 1.0
+
+    def forward(self, x):
+        y = self.conv2(self.conv1(x))
+        return (y + self.alpha * x) if self.add else y
+
+def RepBlock(c1, c2, n=1):
+    block = partial(RepConv, act=F.relu)
+    return nn.Sequential(block(c1, c2), *[block(c2, c2) for _ in range(n - 1)])
+
+def BottleRepBlock(c1, c2):
+    n = n // 2
+    block = partial(BottleRep, basic_block=partial(RepConv, act=F.relu), weight=True)
+    return nn.Sequential(block(c1, c2), *[block(c2, c2) for _ in range(n - 1)])
+        
 def CIB(c1, c2, shortcut=True, e=0.5, lk=False):
     c_  = int(c2 * e)  # hidden channels
     net = nn.Sequential(Conv(c1, c1, 3, g=c1),
@@ -220,30 +247,33 @@ class Spp(nn.Module):
         return x
     
 class SPPF(nn.Module):
-    def __init__(self, c1, c2):  # equivalent to SPP(k=(5, 9, 13))
+    def __init__(self, c1, c2, act=nn.SiLU(True)):  # equivalent to SPP(k=(5, 9, 13))
         super().__init__()
         c_          = c1 // 2  # hidden channels
-        self.cv1    = Conv(c1, c_, 1, 1)
-        self.cv2    = Conv(c_ * 4, c2, 1, 1)
+        conv        = partial(Conv, act=act)
+        self.cv1    = conv(c1, c_, 1, 1)
+        self.cv2    = conv(c_ * 4, c2, 1, 1)
+        self.m      = nn.MaxPool2d(kernel_size=5, stride=1, padding=2)
     def forward(self, x):
         x  = self.cv1(x)
-        y1 = torch.max_pool2d(x, 5, 1, 2)
-        y2 = torch.max_pool2d(y1, 5, 1, 2)
-        y3 = torch.max_pool2d(y2, 5, 1, 2)
+        y1 = self.m(x)
+        y2 = self.m(y1)
+        y3 = self.m(y2)
         return self.cv2(torch.cat((x, y1, y2, y3), 1))
 
 class SPPCSPC(nn.Module):
-    def __init__(self, c1, c2, e=0.5, k=(5, 9, 13)):
+    def __init__(self, c1, c2, e=0.5, k=(5, 9, 13), act=nn.SiLU(True)):
         super().__init__()
-        c_ = int(2 * c2 * e)  # hidden channels
-        self.cv1 = Conv(c1, c_, 1, 1)
-        self.cv2 = Conv(c1, c_, 1, 1)
-        self.cv3 = Conv(c_, c_, 3, 1)
-        self.cv4 = Conv(c_, c_, 1, 1)
+        c_   = int(2 * c2 * e)  # hidden channels
+        conv = partial(Conv, act=act)
+        self.cv1 = conv(c1, c_, 1, 1)
+        self.cv2 = conv(c1, c_, 1, 1)
+        self.cv3 = conv(c_, c_, 3, 1)
+        self.cv4 = conv(c_, c_, 1, 1)
         self.m = nn.ModuleList([nn.MaxPool2d(kernel_size=x, stride=1, padding=x // 2) for x in k])
-        self.cv5 = Conv(4 * c_, c_, 1, 1)
-        self.cv6 = Conv(c_, c_, 3, 1)
-        self.cv7 = Conv(2 * c_, c2, 1, 1)
+        self.cv5 = conv(4 * c_, c_, 1, 1)
+        self.cv6 = conv(c_, c_, 3, 1)
+        self.cv7 = conv(2 * c_, c2, 1, 1)
 
     def forward(self, x):
         x1 = self.cv4(self.cv3(self.cv1(x)))
@@ -478,6 +508,28 @@ class BackboneV10(nn.Module):
         x10 = self.b10(self.b9(self.b8(self.b7(x6))))        # 10 P5/32
         return x4, x6, x10
 
+class EfficientRep(nn.Module):
+    def __init__(self, w, r, d, cspsppf=False):
+        super().__init__()
+        sppf    = partial(SPPCSPC, e=0.25) if cspsppf else SPPF
+        self.b0 = RepConv( c1=3,          c2=int(64*w),  s=2, act=F.relu)
+        self.b1 = RepConv( c1=int(64*w),  c2=int(128*w), s=2, act=F.relu)
+        self.b2 = RepBlock(c1=int(128*w), c2=int(128*w), n=round(6*d))
+        self.b3 = RepConv( c1=int(128*w), c2=int(256*w), s=2)
+        self.b4 = RepBlock(c1=int(256*w), c2=int(256*w), n=round(12*d))
+        self.b5 = RepConv( c1=int(256*w), c2=int(512*w), s=2)
+        self.b6 = RepBlock(c1=int(512*w), c2=int(512*w), n=round(18*d))
+        self.b7 = RepConv( c1=int(512*w), c2=int(1024*w),s=2)
+        self.b8 = RepBlock(c1=int(1024*w),c2=int(1024*w),n=round(6*d))
+        self.b9 = sppf( c1=int(1024*w),c2=int(1024*w), act=nn.ReLU(True))
+
+    def forward(self, x):
+        x4  = self.b2(self.b1(self.b0(x)))      # p2/4
+        x8  = self.b4(self.b3(x4))              # p3/8
+        x16 = self.b6(self.b5(x8))              # p4/16
+        x32 = self.b9(self.b8(self.b7(x16)))    # p5/32
+        return x4, x8, x16, x32
+    
 class HeadV3(nn.Module):
     def __init__(self, spp):
         super().__init__() 
@@ -685,9 +737,9 @@ class DetectV3(nn.Module):
         pred            = torch.cat([box, l.sigmoid(), cls.sigmoid()], -1)
 
         if exists(targets):
-            # anchors               = torch.cat([sxy-awh/2, sxy+awh/2],-1)
-            # tboxes, tscores, tcls = assigner.atss(anchors, targets, [p[0] for p in ps], self.nc, 9)
-            tboxes, tscores, tcls = assigner.tal(box, cls.sigmoid(), sxy, targets, 9, 0.5, 6.0)
+            anchors               = torch.cat([sxy-awh/2, sxy+awh/2],-1)
+            tboxes, tscores, tcls = assigner.atss(anchors, targets, [p[0] for p in ps], self.nc, 9)
+            # tboxes, tscores, tcls = assigner.tal(box, cls.sigmoid(), sxy, targets, 9, 0.5, 6.0)
             mask                  = tscores > 0
 
             # CIOU loss (positive samples)

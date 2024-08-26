@@ -509,7 +509,7 @@ class BackboneV10(nn.Module):
         return x4, x6, x10
 
 class EfficientRep(nn.Module):
-    def __init__(self, w, r, d, cspsppf=False):
+    def __init__(self, w, d, cspsppf=False):
         super().__init__()
         sppf    = partial(SPPCSPC, e=0.25) if cspsppf else SPPF
         self.b0 = RepConv( c1=3,          c2=int(64*w),  s=2, act=F.relu)
@@ -664,6 +664,43 @@ class HeadV10(nn.Module):
         x19 = self.n4(torch.cat([self.n3(x16),x13], 1)) # 19 (P4/16-medium)
         x22 = self.n6(torch.cat([self.n5(x19),x10], 1)) # 22 (P5/32-large)
         return [x16, x19, x22]
+
+class BiFusion(nn.Module):
+    def __init__(self, c1, c2):
+        super().__init__()
+        self.cv1 = Conv(c1[0], c2, 1, 1, act=nn.ReLU(True))
+        self.cv2 = Conv(c1[1], c2, 1, 1, act=nn.ReLU(True))
+        self.cv3 = Conv(c2*3,  c2, 1, 1, act=nn.ReLU(True))
+        self.up  = nn.ConvTranspose2d(c2, c2, kernel_size=2, stride=2, bias=True)
+        self.do  = Conv(c2, c2, k=3, s=2)
+
+    def forward(self, x):
+        x0 = self.up(x[0])
+        x1 = self.cv1(x[1])
+        x2 = self.do(self.cv2(x[2]))
+        return self.cv3(torch.cat((x0, x1, x2), dim=1))
+    
+class RepBiFPANNeck(nn.Module):
+    def __init__(self, w, d):
+        super().__init__()
+        self.b0 = Conv(int(1024*w), int(256*w), k=1, s=1, act=nn.ReLU(True))
+        self.b1 = BiFusion([int(512*w), int(256*w)], int(256*w))
+        self.b2 = RepBlock(int(256*w), int(256*w), n=round(12*d))
+        self.b3 = Conv(int(256*w), int(128*w), k=1, s=1, act=nn.ReLU(True))
+        self.b4 = BiFusion([int(256*w), int(128*w)], int(128*w))
+        self.b5 = RepBlock(int(128*w), int(128*w), n=round(12*d))
+        self.b6 = Conv(int(128*w), int(128*w), k=3, s=2, act=nn.ReLU(True))
+        self.b7 = RepBlock(int(128*w)+int(128*w), int(256*w), n=round(12*d))
+        self.b8 = Conv(int(256*w), int(256*w), k=3, s=2, act=nn.ReLU(True))
+        self.b9 = RepBlock(int(256*w)+int(256*w), int(512*w), n=round(12*d))
+
+    def forward(self, x4, x8, x16, x32):
+        fpn_out0    = self.b0(x32)
+        fpn_out1    = self.b3(self.b2(self.b1([fpn_out0, x16, x8])))
+        pan_8       = self.b5(self.b4([fpn_out1, x8, x4])) # (P3/8-small)
+        pan_16      = self.b7(torch.cat([self.b6(pan_8), fpn_out1], 1)) #(P4/16-medium)
+        pan_32      = self.b9(torch.cat([self.b8(pan_16), fpn_out0], 1)) # (P5/32-large)
+        return pan_8, pan_16, pan_32
 
 def dfl_loss (
     target_bbox,        # [B,N,4] (input resolution)

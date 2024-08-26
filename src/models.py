@@ -51,7 +51,7 @@ def get_variant_multiplesV6(variant: str):
         case 'n': return (0.33, 0.25)
         case 's': return (0.33, 0.50)
         case 'm': return (0.60, 0.75)
-        case 'l': return (1.00, 1.00)
+        # case 'l': return (1.00, 1.00)
 
 def get_variant_multiplesV8(variant: str):
     match variant:
@@ -137,31 +137,6 @@ def SCDown(c1, c2, k, s):
 def MaxPool(stride):
     return nn.Sequential(nn.ZeroPad2d((0,1,0,1)), nn.MaxPool2d(kernel_size=2, stride=stride))
 
-class C3(nn.Module):
-    def __init__(self, c1, c2, n=1, shortcut=True, e=0.5):
-        super().__init__()
-        c_       = int(c2 * e)  # hidden channels
-        self.cv1 = Conv(c1, c_, 1, 1)
-        self.cv2 = Conv(c1, c_, 1, 1)
-        self.cv3 = Conv(2 * c_, c2, 1)  # optional act=FReLU(c2)f
-        self.m   = Repeat(Bottleneck(c_, shortcut=shortcut, k=(1, 3), e=1.0), n)
-
-    def forward(self, x):
-        return self.cv3(torch.cat((self.m(self.cv1(x)), self.cv2(x)), 1))
-    
-class C2f(nn.Module):
-    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):  # ch_in, ch_out, number, shortcut, groups, expansion
-        super().__init__()
-        self.c_  = int(c2 * e)  # hidden channels
-        self.cv1 = Conv(c1, 2 * self.c_, 1, 1)
-        self.cv2 = Conv((2 + n) * self.c_, c2, 1)  # optional act=FReLU(c2)
-        self.m   = nn.ModuleList(Bottleneck(self.c_, k=(3, 3), e=1.0, g=g, shortcut=shortcut) for _ in range(n))
-
-    def forward(self, x):
-        y = list(self.cv1(x).chunk(2, 1))
-        y.extend(m(y[-1]) for m in self.m)
-        return self.cv2(torch.cat(y, 1))
-
 class CspBlock(nn.Module):
     def __init__(self, c1, c2, f=1, e=1, act=actV3, n=1):
         super().__init__()
@@ -203,10 +178,10 @@ class RepConv(nn.Module):
         return self.act(self.c1(x) + self.c2(x) + id_out, inplace=True)
 
 class BottleRep(nn.Module):
-    def __init__(self, c1, c2, basic_block=partial(RepConv, act=F.relu), weight=False):
+    def __init__(self, c1, c2, weight=False):
         super().__init__()
-        self.conv1 = basic_block(c1, c2)
-        self.conv2 = basic_block(c1, c2)
+        self.conv1 = RepConv(c1, c2, act=F.relu)
+        self.conv2 = RepConv(c1, c2, act=F.relu)
         self.add   = c1==c2
         self.alpha = nn.Parameter(torch.ones(1)) if weight else 1.0
 
@@ -218,11 +193,48 @@ def RepBlock(c1, c2, n=1):
     block = partial(RepConv, act=F.relu)
     return nn.Sequential(block(c1, c2), *[block(c2, c2) for _ in range(n - 1)])
 
-def BottleRepBlock(c1, c2):
+def BottleRepBlock(c1, c2, n=1):
     n = n // 2
-    block = partial(BottleRep, basic_block=partial(RepConv, act=F.relu), weight=True)
+    block = partial(BottleRep, weight=True)
     return nn.Sequential(block(c1, c2), *[block(c2, c2) for _ in range(n - 1)])
-        
+
+class C2f(nn.Module):
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):  # ch_in, ch_out, number, shortcut, groups, expansion
+        super().__init__()
+        self.c_  = int(c2 * e)  # hidden channels
+        self.cv1 = Conv(c1, 2 * self.c_, 1, 1)
+        self.cv2 = Conv((2 + n) * self.c_, c2, 1)  # optional act=FReLU(c2)
+        self.m   = nn.ModuleList(Bottleneck(self.c_, k=(3, 3), e=1.0, g=g, shortcut=shortcut) for _ in range(n))
+
+    def forward(self, x):
+        y = list(self.cv1(x).chunk(2, 1))
+        y.extend(m(y[-1]) for m in self.m)
+        return self.cv2(torch.cat(y, 1))
+    
+class C3(nn.Module):
+    def __init__(self, c1, c2, n=1, shortcut=True, e=0.5):
+        super().__init__()
+        c_       = int(c2 * e)  # hidden channels
+        self.cv1 = Conv(c1, c_, 1, 1)
+        self.cv2 = Conv(c1, c_, 1, 1)
+        self.cv3 = Conv(2 * c_, c2, 1)  # optional act=FReLU(c2)f
+        self.m   = Repeat(Bottleneck(c_, shortcut=shortcut, k=(1, 3), e=1.0), n)
+
+    def forward(self, x):
+        return self.cv3(torch.cat((self.m(self.cv1(x)), self.cv2(x)), 1))
+
+class BepC3(nn.Module):
+    def __init__(self, c1, c2, n=1, e=0.5):
+        super().__init__()
+        c_ = int(c2 * e)  # hidden channels
+        self.cv1 = Conv(c1, c_, 1, 1, act=nn.ReLU(True))
+        self.cv2 = Conv(c1, c_, 1, 1, act=nn.ReLU(True))
+        self.cv3 = Conv(2*c_, c2, 1, 1, act=nn.ReLU(True))
+        self.m   = BottleRepBlock(c_, c_, n=n)
+
+    def forward(self, x):
+        return self.cv3(torch.cat((self.m(self.cv1(x)), self.cv2(x)), dim=1))
+    
 def CIB(c1, c2, shortcut=True, e=0.5, lk=False):
     c_  = int(c2 * e)  # hidden channels
     net = nn.Sequential(Conv(c1, c1, 3, g=c1),
@@ -533,6 +545,28 @@ class EfficientRep(nn.Module):
         x32 = self.b9(self.b8(self.b7(x16)))    # p5/32
         return x4, x8, x16, x32
     
+class CSPBepBackbone(nn.Module):
+    def __init__(self, w, d, csp_e=1/2, cspsppf=False):
+        super().__init__()
+        sppf    = partial(SPPCSPC, e=0.25) if cspsppf else SPPF
+        self.b0 = RepConv(c1=3,          c2=int(64*w),  s=2, act=F.relu)
+        self.b1 = RepConv(c1=int(64*w),  c2=int(128*w), s=2, act=F.relu)
+        self.b2 = BepC3(  c1=int(128*w), c2=int(128*w), e=csp_e, n=round(6*d))
+        self.b3 = RepConv(c1=int(128*w), c2=int(256*w), s=2)
+        self.b4 = BepC3(  c1=int(256*w), c2=int(256*w), e=csp_e, n=round(12*d))
+        self.b5 = RepConv(c1=int(256*w), c2=int(512*w), s=2)
+        self.b6 = BepC3(  c1=int(512*w), c2=int(512*w), e=csp_e, n=round(18*d))
+        self.b7 = RepConv(c1=int(512*w), c2=int(1024*w),s=2)
+        self.b8 = BepC3(  c1=int(1024*w),c2=int(1024*w),e=csp_e, n=round(6*d))
+        self.b9 = sppf(   c1=int(1024*w),c2=int(1024*w), act=nn.ReLU(True))
+
+    def forward(self, x):
+        x4  = self.b2(self.b1(self.b0(x)))      # p2/4
+        x8  = self.b4(self.b3(x4))              # p3/8
+        x16 = self.b6(self.b5(x8))              # p4/16
+        x32 = self.b9(self.b8(self.b7(x16)))    # p5/32
+        return x4, x8, x16, x32
+    
 class HeadV3(nn.Module):
     def __init__(self, spp):
         super().__init__() 
@@ -705,6 +739,28 @@ class RepBiFPANNeck(nn.Module):
         pan_32      = self.b9(torch.cat([self.b8(pan_16), fpn_out0], 1)) # (P5/32-large)
         return pan_8, pan_16, pan_32
 
+class CSPRepBiFPANNeck(nn.Module):
+    def __init__(self, w, d, csp_e=1/2):
+        super().__init__()
+        self.b0 = Conv(int(1024*w), int(256*w), k=1, s=1, act=nn.ReLU(True))
+        self.b1 = BiFusion([int(512*w), int(256*w)], int(256*w))
+        self.b2 = BepC3(int(256*w), int(256*w), n=round(12*d), e=csp_e)
+        self.b3 = Conv(int(256*w), int(128*w), k=1, s=1, act=nn.ReLU(True))
+        self.b4 = BiFusion([int(256*w), int(128*w)], int(128*w))
+        self.b5 = BepC3(int(128*w), int(128*w), n=round(12*d), e=csp_e)
+        self.b6 = Conv(int(128*w), int(128*w), k=3, s=2, act=nn.ReLU(True))
+        self.b7 = BepC3(int(128*w)+int(128*w), int(256*w), n=round(12*d), e=csp_e)
+        self.b8 = Conv(int(256*w), int(256*w), k=3, s=2, act=nn.ReLU(True))
+        self.b9 = BepC3(int(256*w)+int(256*w), int(512*w), n=round(12*d), e=csp_e)
+
+    def forward(self, x4, x8, x16, x32):
+        fpn_out0    = self.b0(x32)
+        fpn_out1    = self.b3(self.b2(self.b1([fpn_out0, x16, x8])))
+        pan_8       = self.b5(self.b4([fpn_out1, x8, x4])) # (P3/8-small)
+        pan_16      = self.b7(torch.cat([self.b6(pan_8), fpn_out1], 1)) #(P4/16-medium)
+        pan_32      = self.b9(torch.cat([self.b8(pan_16), fpn_out0], 1)) # (P5/32-large)
+        return pan_8, pan_16, pan_32
+    
 def dfl_loss (
     target_bbox,        # [B,N,4] (input resolution)
     target_mask,        # [B,N]
@@ -996,9 +1052,13 @@ class Yolov10(nn.Module):
 class Yolov6(nn.Module):
     def __init__(self, variant, num_classes):
         super().__init__()
-        d, w      = get_variant_multiplesV6(variant)
-        self.net  = EfficientRep(w, d, cspsppf=True)
-        self.fpn  = RepBiFPANNeck(w, d)
+        d, w = get_variant_multiplesV6(variant)
+        if variant == 'n' or variant == 's':
+            self.net = EfficientRep(w, d, cspsppf=True)
+            self.fpn = RepBiFPANNeck(w, d)
+        if variant == 'm':
+            self.net = CSPBepBackbone(w, d, csp_e=2/3)
+            self.fpn = CSPRepBiFPANNeck(w, d, csp_e=2/3)
         # self.head = Detect(num_classes, ch=(int(128*w), int(256*w), int(512*w)))
 
     def forward(self, x):
@@ -1076,6 +1136,38 @@ def load_yolov7(net: Yolov7, weights_pt: str):
         p1.data.copy_(p2.data)
 
     init_batchnorms(net)
+
+def load_yolov6(net: Yolov6, weights_pt: str):
+    def params(n):
+        # Handle special modules (we've ordered submodules differently)
+        if isinstance(n, RepConv):
+            if n.bn is not None:
+                yield from params(n.bn)
+            yield from params(n.c1)
+            yield from params(n.c2)
+        elif isinstance(n, BottleRep):
+            if isinstance(n.alpha, nn.Parameter):
+                yield n.alpha
+            yield from params(n.conv1)
+            yield from params(n.conv2)
+        # Loop through children recursively
+        else:
+            has_children = False
+            for m in n.children():
+                has_children = True
+                yield from params(m)
+            # No children, yield parameters
+            if not has_children:
+                yield from n.state_dict().values() 
+    
+    state = torch.load(weights_pt, map_location='cpu', weights_only=True)
+    state = {k:v for k,v in state.items() if 'backbone' in k or 'neck' in k}
+    assert (nP1 := sum(p.numel() for p in params(net))) == (nP2 := sum(p.numel() for p in state.values())), f"{nP1} != {nP2}"
+
+    for p1, (k, p2) in zip(params(net), state.items(), strict=True):
+        # print(f"shape: {k} {p2.shape} {p1.shape}")
+        assert p1.shape == p2.shape, f"bad shape: {k} {p2.shape} {p1.shape}"
+        p1.data.copy_(p2.data)
 
 @torch.no_grad()
 def nms(preds: torch.Tensor, conf_thresh: float, nms_thresh: float , has_objectness: bool):

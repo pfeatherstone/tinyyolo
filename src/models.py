@@ -49,6 +49,9 @@ def get_variant_multiplesV5(variant: str):
 def get_variant_multiplesV6(variant: str):
     match variant:
         case 'n': return (0.33, 0.25)
+        case 's': return (0.33, 0.50)
+        case 'm': return (0.60, 0.75)
+        case 'l': return (1.00, 1.00)
 
 def get_variant_multiplesV8(variant: str):
     match variant:
@@ -990,6 +993,19 @@ class Yolov10(nn.Module):
         x = self.fpn(*x)
         return self.head(x)
 
+class Yolov6(nn.Module):
+    def __init__(self, variant, num_classes):
+        super().__init__()
+        d, w      = get_variant_multiplesV6(variant)
+        self.net  = EfficientRep(w, d, cspsppf=True)
+        self.fpn  = RepBiFPANNeck(w, d)
+        # self.head = Detect(num_classes, ch=(int(128*w), int(256*w), int(512*w)))
+
+    def forward(self, x):
+        x = self.net(x)
+        x = self.fpn(*x)
+        return 0 #self.head(x)
+    
 def load_from_ultralytics(net: Union[Yolov5, Yolov8, Yolov10]):
     from ultralytics import YOLO
 

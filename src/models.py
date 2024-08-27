@@ -47,10 +47,11 @@ def get_variant_multiplesV5(variant: str):
         case 'x': return (1.33, 1.25, 2.0)
 
 def get_variant_multiplesV6(variant: str):
+    # depth, width, csp, csp_e, distill
     match variant:
-        case 'n': return (0.33, 0.25)
-        case 's': return (0.33, 0.50)
-        case 'm': return (0.60, 0.75)
+        case 'n': return (0.33, 0.25, False, 0,   True)
+        case 's': return (0.33, 0.50, False, 0,   True)
+        case 'm': return (0.60, 0.75, True,  2/3, False)
         # case 'l': return (1.00, 1.00)
 
 def get_variant_multiplesV8(variant: str):
@@ -925,6 +926,121 @@ class DetectV10(Detect):
     def forward(self, x):
         # TODO: implement all the topk stuff. I think yolov10 doesn't need NMS. But you can you use it in inference mode for now.
         return self.inference(self.forward_feat(x, self.one2one_cv2, self.one2one_cv3))
+
+class DetectV6(nn.Module):
+    def __init__(self, nc=80, ch=(), use_dfl=False, distill=False):
+        super().__init__()
+        self.nc         = nc                        # number of classes
+        self.na         = 1                         # number of changes
+        self.reg_max    = 16 if use_dfl else 0      # DFL channels
+        self.strides    = [8, 16, 32]               # strides computed during build
+        # self.c2         = max((16, ch[0] // 4, self.reg_max * 4))
+        # self.c3         = max(ch[0], min(self.nc, 100))  # channels
+        # self.cv2        = nn.ModuleList(nn.Sequential(Conv(x, self.c2, 3), Conv(self.c2, self.c2, 3), nn.Conv2d(self.c2, 4 * self.reg_max, 1)) for x in ch)
+        # self.cv3        = nn.ModuleList(nn.Sequential(Conv(x, self.c3, 3), Conv(self.c3, self.c3, 3), nn.Conv2d(self.c3, self.nc, 1)) for x in ch)
+
+        # Decoupled head
+        self.stems          = nn.ModuleList([Conv(c1=c, c2=c, k=1, act=nn.SiLU(True)) for c in ch])
+        self.cls_convs      = nn.ModuleList([Conv(c1=c, c2=c, k=3, act=nn.SiLU(True)) for c in ch])
+        self.reg_convs      = nn.ModuleList([Conv(c1=c, c2=c, k=3, act=nn.SiLU(True)) for c in ch])
+        self.cls_preds      = nn.ModuleList([nn.Conv2d(c, self.na*self.nc,            kernel_size=1) for c in ch])
+        self.reg_preds_dist = nn.ModuleList([nn.Conv2d(c, 4*(self.na + self.reg_max), kernel_size=1) for c in ch])
+        self.reg_preds      = nn.ModuleList([nn.Conv2d(c, 4*(self.na),                kernel_size=1) for c in ch]) if distill else None
+        self.r              = nn.Parameter(torch.arange(self.reg_max).float(), requires_grad=False) if use_dfl else None
+
+    @torch.no_grad()
+    def make_anchors(self, feats):
+        xys, strides = [], []
+        for x, stride in zip(feats, self.strides):
+            h, w    = x.shape[2], x.shape[3]
+            sx      = (torch.arange(end=w, device=x.device) + 0.5) * stride
+            sy      = (torch.arange(end=h, device=x.device) + 0.5) * stride
+            sy, sx  = torch.meshgrid(sy, sx, indexing='ij')
+            xy      = rearrange([sx,sy], 'c h w -> (h w) c')
+            xys.append(xy)
+            strides.append(torch.full((h*w,1), fill_value=stride, device=x.device))
+        return *pack(xys, '* c'), torch.cat(strides,0)
+    
+    def forward(self, xs, targets=None):
+
+        # cls_score_list = []
+        #     reg_dist_list = []
+
+        #     for i in range(self.nl):
+        #         b, _, h, w = x[i].shape
+        #         l = h * w
+        #         x[i] = self.stems[i](x[i])
+        #         cls_x = x[i]
+        #         reg_x = x[i]
+        #         cls_feat = self.cls_convs[i](cls_x)
+        #         cls_output = self.cls_preds[i](cls_feat)
+        #         reg_feat = self.reg_convs[i](reg_x)
+        #         reg_output = self.reg_preds[i](reg_feat)
+
+        #         if self.use_dfl:
+        #             reg_output = reg_output.reshape([-1, 4, self.reg_max + 1, l]).permute(0, 2, 1, 3)
+        #             reg_output = self.proj_conv(F.softmax(reg_output, dim=1))
+
+        #         cls_output = torch.sigmoid(cls_output)
+
+        #         if self.export:
+        #             cls_score_list.append(cls_output)
+        #             reg_dist_list.append(reg_output)
+        #         else:
+        #             cls_score_list.append(cls_output.reshape([b, self.nc, l]))
+        #             reg_dist_list.append(reg_output.reshape([b, 4, l]))
+
+        #     if self.export:
+        #         return tuple(torch.cat([cls, reg], 1) for cls, reg in zip(cls_score_list, reg_dist_list))
+
+        #     cls_score_list = torch.cat(cls_score_list, axis=-1).permute(0, 2, 1)
+        #     reg_dist_list = torch.cat(reg_dist_list, axis=-1).permute(0, 2, 1)
+
+
+        #     anchor_points, stride_tensor = generate_anchors(
+        #         x, self.stride, self.grid_cell_size, self.grid_cell_offset, device=x[0].device, is_eval=True, mode='af')
+
+        #     pred_bboxes = dist2bbox(reg_dist_list, anchor_points, box_format='xywh')
+        #     pred_bboxes *= stride_tensor
+        #     return torch.cat(
+        #         [
+        #             pred_bboxes,
+        #             torch.ones((b, pred_bboxes.shape[1], 1), device=pred_bboxes.device, dtype=pred_bboxes.dtype),
+        #             cls_score_list
+        #         ],
+        #         axis=-1)
+    
+
+        sxy, ps, strides = self.make_anchors(xs)
+        feats       = [rearrange(torch.cat((c1(x), c2(x)), 1), 'b f h w -> b (h w) f') for x,c1,c2 in zip(xs, self.cv2, self.cv3)]
+        dist, cls   = torch.cat(feats, 1).split((4 * self.reg_max, self.nc), -1)
+        dist        = rearrange(dist, 'b n (k r) -> b n k r', k=4)
+        lt, rb      = torch.einsum('bnkr, r -> bnk', dist.softmax(-1), self.r).chunk(2, 2)
+        x1y1        = sxy - lt*strides
+        x2y2        = sxy + rb*strides
+        box         = torch.cat([x1y1,x2y2],-1)
+        pred        = torch.cat((box, cls.sigmoid()), -1)
+
+        if exists(targets):
+            # awh                     = torch.full_like(sxy, fill_value=5.0) * strides # Fake height and width for the sake of ATSS
+            # anchors                 = torch.cat([sxy-awh/2, sxy+awh/2],-1)
+            # tboxes, tscores, tcls   = assigner.atss(anchors, targets, [p[0] for p in ps], self.nc, 9)
+            tboxes, tscores, tcls   = assigner.tal(box, cls.sigmoid(), sxy, targets, 9, 0.5, 6.0)
+            # tboxes, tscores, tcls   = assigner.fcos(sxy, targets, self.nc)
+            mask                    = tscores > 0
+
+            # CIOU loss (positive samples)
+            tgt_scores_sum = max(tscores.sum(), 1)
+            weight   = tscores[mask]
+            loss_iou = (torchvision.ops.complete_box_iou_loss(box[mask], tboxes[mask], reduction='none') * weight).sum() / tgt_scores_sum
+
+            # DFL loss (positive samples)
+            loss_dfl = dfl_loss(tboxes, mask, tgt_scores_sum, sxy, strides, dist)
+            
+            # Class loss (positive samples + negative)
+            loss_cls = F.binary_cross_entropy_with_logits(cls, tcls*tscores.unsqueeze(-1), reduction='sum') / tgt_scores_sum
+
+        return pred if not exists(targets) else (pred, {'iou': loss_iou, 'dfl': loss_dfl, 'cls': loss_cls})
     
 class Yolov3(nn.Module):
     def __init__(self, nclasses, spp):
@@ -1052,19 +1168,15 @@ class Yolov10(nn.Module):
 class Yolov6(nn.Module):
     def __init__(self, variant, num_classes):
         super().__init__()
-        d, w = get_variant_multiplesV6(variant)
-        if variant == 'n' or variant == 's':
-            self.net = EfficientRep(w, d, cspsppf=True)
-            self.fpn = RepBiFPANNeck(w, d)
-        if variant == 'm':
-            self.net = CSPBepBackbone(w, d, csp_e=2/3)
-            self.fpn = CSPRepBiFPANNeck(w, d, csp_e=2/3)
-        # self.head = Detect(num_classes, ch=(int(128*w), int(256*w), int(512*w)))
+        d, w, csp, csp_e, distill = get_variant_multiplesV6(variant)
+        self.net  = CSPBepBackbone(w, d, csp_e=csp_e)   if csp else EfficientRep(w, d, cspsppf=True)
+        self.fpn  = CSPRepBiFPANNeck(w, d, csp_e=csp_e) if csp else RepBiFPANNeck(w, d)
+        self.head = DetectV6(num_classes, ch=(int(128*w), int(256*w), int(512*w)), use_dfl=True, distill=distill)
 
     def forward(self, x):
         x = self.net(x)
         x = self.fpn(*x)
-        return 0 #self.head(x)
+        return self.head(x)
     
 def load_from_ultralytics(net: Union[Yolov5, Yolov8, Yolov10]):
     from ultralytics import YOLO
@@ -1161,13 +1273,17 @@ def load_yolov6(net: Yolov6, weights_pt: str):
                 yield from n.state_dict().values() 
     
     state = torch.load(weights_pt, map_location='cpu', weights_only=True)
-    state = {k:v for k,v in state.items() if 'backbone' in k or 'neck' in k}
+    del state['detect.proj']
+    del state['detect.proj_conv.weight']
+    # state = {k:v for k,v in state.items() if 'backbone' in k or 'neck' in k}
     assert (nP1 := sum(p.numel() for p in params(net))) == (nP2 := sum(p.numel() for p in state.values())), f"{nP1} != {nP2}"
 
     for p1, (k, p2) in zip(params(net), state.items(), strict=True):
         # print(f"shape: {k} {p2.shape} {p1.shape}")
         assert p1.shape == p2.shape, f"bad shape: {k} {p2.shape} {p1.shape}"
         p1.data.copy_(p2.data)
+
+    init_batchnorms(net)
 
 @torch.no_grad()
 def nms(preds: torch.Tensor, conf_thresh: float, nms_thresh: float , has_objectness: bool):

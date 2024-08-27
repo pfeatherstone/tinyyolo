@@ -936,7 +936,7 @@ class DetectV6(nn.Module):
     def __init__(self, nc=80, ch=(), use_dfl=False, distill=False):
         super().__init__()
         self.nc         = nc                        # number of classes
-        self.na         = 1                         # number of changes
+        self.na         = 1                         # number of anchors
         self.reg_max    = 16 if use_dfl else 0      # DFL channels
         self.strides    = [8, 16, 32]               # strides
         # Decoupled head

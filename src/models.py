@@ -733,12 +733,12 @@ class RepBiFPANNeck(nn.Module):
         self.b9 = RepBlock(int(256*w)+int(256*w), int(512*w), n=round(12*d))
 
     def forward(self, x4, x8, x16, x32):
-        fpn_out0    = self.b0(x32)
-        fpn_out1    = self.b3(self.b2(self.b1([fpn_out0, x16, x8])))
-        pan_8       = self.b5(self.b4([fpn_out1, x8, x4])) # (P3/8-small)
-        pan_16      = self.b7(torch.cat([self.b6(pan_8), fpn_out1], 1)) #(P4/16-medium)
-        pan_32      = self.b9(torch.cat([self.b8(pan_16), fpn_out0], 1)) # (P5/32-large)
-        return pan_8, pan_16, pan_32
+        a   = self.b0(x32)
+        b   = self.b3(self.b2(self.b1([a, x16, x8])))
+        p3  = self.b5(self.b4([b, x8, x4]))             # (P3/8-small)
+        p4  = self.b7(torch.cat([self.b6(p3), b], 1))   # (P4/16-medium)
+        p5  = self.b9(torch.cat([self.b8(p4), a], 1))   # (P5/32-large)
+        return p3, p4, p5
 
 class CSPRepBiFPANNeck(nn.Module):
     def __init__(self, w, d, csp_e=1/2):
@@ -755,12 +755,12 @@ class CSPRepBiFPANNeck(nn.Module):
         self.b9 = BepC3(int(256*w)+int(256*w), int(512*w), n=round(12*d), e=csp_e)
 
     def forward(self, x4, x8, x16, x32):
-        fpn_out0    = self.b0(x32)
-        fpn_out1    = self.b3(self.b2(self.b1([fpn_out0, x16, x8])))
-        pan_8       = self.b5(self.b4([fpn_out1, x8, x4])) # (P3/8-small)
-        pan_16      = self.b7(torch.cat([self.b6(pan_8), fpn_out1], 1)) #(P4/16-medium)
-        pan_32      = self.b9(torch.cat([self.b8(pan_16), fpn_out0], 1)) # (P5/32-large)
-        return pan_8, pan_16, pan_32
+        a   = self.b0(x32)
+        b   = self.b3(self.b2(self.b1([a, x16, x8])))
+        p3  = self.b5(self.b4([b, x8, x4]))             # (P3/8-small)
+        p4  = self.b7(torch.cat([self.b6(p3), b], 1))   # (P4/16-medium)
+        p5  = self.b9(torch.cat([self.b8(p4), a], 1))   # (P5/32-large)
+        return p3, p4, p5
     
 def dfl_loss (
     target_bbox,        # [B,N,4] (input resolution)
@@ -852,6 +852,13 @@ class DetectV3(nn.Module):
 
         return pred if not exists(targets) else (pred, {'iou': loss_iou, 'cls': loss_cls, 'obj': loss_obj})
 
+def dist2box(dist, sxy, strides):
+    lt, rb  = dist.chunk(2, 2)
+    x1y1    = sxy - lt*strides
+    x2y2    = sxy + rb*strides
+    box     = torch.cat([x1y1,x2y2],-1)
+    return box
+
 class Detect(nn.Module):
     def __init__(self, nc=80, ch=()):
         super().__init__()
@@ -883,10 +890,8 @@ class Detect(nn.Module):
         feats       = [rearrange(torch.cat((c1(x), c2(x)), 1), 'b f h w -> b (h w) f') for x,c1,c2 in zip(xs, self.cv2, self.cv3)]
         dist, cls   = torch.cat(feats, 1).split((4 * self.reg_max, self.nc), -1)
         dist        = rearrange(dist, 'b n (k r) -> b n k r', k=4)
-        lt, rb      = torch.einsum('bnkr, r -> bnk', dist.softmax(-1), self.r).chunk(2, 2)
-        x1y1        = sxy - lt*strides
-        x2y2        = sxy + rb*strides
-        box         = torch.cat([x1y1,x2y2],-1)
+        ltrb        = torch.einsum('bnkr, r -> bnk', dist.softmax(-1), self.r)
+        box         = dist2box(ltrb, sxy, strides)
         pred        = torch.cat((box, cls.sigmoid()), -1)
 
         if exists(targets):
@@ -933,12 +938,7 @@ class DetectV6(nn.Module):
         self.nc         = nc                        # number of classes
         self.na         = 1                         # number of changes
         self.reg_max    = 16 if use_dfl else 0      # DFL channels
-        self.strides    = [8, 16, 32]               # strides computed during build
-        # self.c2         = max((16, ch[0] // 4, self.reg_max * 4))
-        # self.c3         = max(ch[0], min(self.nc, 100))  # channels
-        # self.cv2        = nn.ModuleList(nn.Sequential(Conv(x, self.c2, 3), Conv(self.c2, self.c2, 3), nn.Conv2d(self.c2, 4 * self.reg_max, 1)) for x in ch)
-        # self.cv3        = nn.ModuleList(nn.Sequential(Conv(x, self.c3, 3), Conv(self.c3, self.c3, 3), nn.Conv2d(self.c3, self.nc, 1)) for x in ch)
-
+        self.strides    = [8, 16, 32]               # strides
         # Decoupled head
         self.stems          = nn.ModuleList([Conv(c1=c, c2=c, k=1, act=nn.SiLU(True)) for c in ch])
         self.cls_convs      = nn.ModuleList([Conv(c1=c, c2=c, k=3, act=nn.SiLU(True)) for c in ch])
@@ -946,7 +946,7 @@ class DetectV6(nn.Module):
         self.cls_preds      = nn.ModuleList([nn.Conv2d(c, self.na*self.nc,            kernel_size=1) for c in ch])
         self.reg_preds_dist = nn.ModuleList([nn.Conv2d(c, 4*(self.na + self.reg_max), kernel_size=1) for c in ch])
         self.reg_preds      = nn.ModuleList([nn.Conv2d(c, 4*(self.na),                kernel_size=1) for c in ch]) if distill else None
-        self.r              = nn.Parameter(torch.arange(self.reg_max).float(), requires_grad=False) if use_dfl else None
+        self.r              = nn.Parameter(torch.arange(self.reg_max+1).float(), requires_grad=False) if use_dfl else None
 
     @torch.no_grad()
     def make_anchors(self, feats):
@@ -962,63 +962,15 @@ class DetectV6(nn.Module):
         return *pack(xys, '* c'), torch.cat(strides,0)
     
     def forward(self, xs, targets=None):
-
-        # cls_score_list = []
-        #     reg_dist_list = []
-
-        #     for i in range(self.nl):
-        #         b, _, h, w = x[i].shape
-        #         l = h * w
-        #         x[i] = self.stems[i](x[i])
-        #         cls_x = x[i]
-        #         reg_x = x[i]
-        #         cls_feat = self.cls_convs[i](cls_x)
-        #         cls_output = self.cls_preds[i](cls_feat)
-        #         reg_feat = self.reg_convs[i](reg_x)
-        #         reg_output = self.reg_preds[i](reg_feat)
-
-        #         if self.use_dfl:
-        #             reg_output = reg_output.reshape([-1, 4, self.reg_max + 1, l]).permute(0, 2, 1, 3)
-        #             reg_output = self.proj_conv(F.softmax(reg_output, dim=1))
-
-        #         cls_output = torch.sigmoid(cls_output)
-
-        #         if self.export:
-        #             cls_score_list.append(cls_output)
-        #             reg_dist_list.append(reg_output)
-        #         else:
-        #             cls_score_list.append(cls_output.reshape([b, self.nc, l]))
-        #             reg_dist_list.append(reg_output.reshape([b, 4, l]))
-
-        #     if self.export:
-        #         return tuple(torch.cat([cls, reg], 1) for cls, reg in zip(cls_score_list, reg_dist_list))
-
-        #     cls_score_list = torch.cat(cls_score_list, axis=-1).permute(0, 2, 1)
-        #     reg_dist_list = torch.cat(reg_dist_list, axis=-1).permute(0, 2, 1)
-
-
-        #     anchor_points, stride_tensor = generate_anchors(
-        #         x, self.stride, self.grid_cell_size, self.grid_cell_offset, device=x[0].device, is_eval=True, mode='af')
-
-        #     pred_bboxes = dist2bbox(reg_dist_list, anchor_points, box_format='xywh')
-        #     pred_bboxes *= stride_tensor
-        #     return torch.cat(
-        #         [
-        #             pred_bboxes,
-        #             torch.ones((b, pred_bboxes.shape[1], 1), device=pred_bboxes.device, dtype=pred_bboxes.dtype),
-        #             cls_score_list
-        #         ],
-        #         axis=-1)
-    
-
         sxy, ps, strides = self.make_anchors(xs)
-        feats       = [rearrange(torch.cat((c1(x), c2(x)), 1), 'b f h w -> b (h w) f') for x,c1,c2 in zip(xs, self.cv2, self.cv3)]
-        dist, cls   = torch.cat(feats, 1).split((4 * self.reg_max, self.nc), -1)
-        dist        = rearrange(dist, 'b n (k r) -> b n k r', k=4)
-        lt, rb      = torch.einsum('bnkr, r -> bnk', dist.softmax(-1), self.r).chunk(2, 2)
-        x1y1        = sxy - lt*strides
-        x2y2        = sxy + rb*strides
-        box         = torch.cat([x1y1,x2y2],-1)
+        xs          = [l(x) for l,x in zip(self.stems, xs)]
+        cls         = torch.cat([rearrange(c2(c1(x)), 'b f h w -> b (h w) f') for c1,c2,x in zip(self.cls_convs, self.cls_preds, xs)], 1)
+        reg         = [c1(x) for c1,x in zip(self.reg_convs, xs)]
+        dist        = torch.cat([rearrange(c2(x), 'b (k r) h w -> b (h w) k r', k=4) for c2,x in zip(self.reg_preds_dist, reg)], 1)
+        ltrb        = torch.einsum('bnkr, r -> bnk', dist.softmax(-1), self.r)
+        box         = dist2box(ltrb, sxy, strides)
+        ltrb        = torch.cat([rearrange(c2(x), 'b k h w -> b (h w) k') for c2,x in zip(self.reg_preds, reg)], 1) if exists(self.reg_preds) else None
+        box_distill = dist2box(ltrb, sxy, strides)
         pred        = torch.cat((box, cls.sigmoid()), -1)
 
         if exists(targets):
@@ -1031,16 +983,17 @@ class DetectV6(nn.Module):
 
             # CIOU loss (positive samples)
             tgt_scores_sum = max(tscores.sum(), 1)
-            weight   = tscores[mask]
-            loss_iou = (torchvision.ops.complete_box_iou_loss(box[mask], tboxes[mask], reduction='none') * weight).sum() / tgt_scores_sum
-
+            weight           = tscores[mask]
+            loss_iou         = (torchvision.ops.complete_box_iou_loss(box[mask],         tboxes[mask], reduction='none') * weight).sum() / tgt_scores_sum
+            loss_iou_distill = (torchvision.ops.complete_box_iou_loss(box_distill[mask], tboxes[mask], reduction='none') * weight).sum() / tgt_scores_sum
+            
             # DFL loss (positive samples)
             loss_dfl = dfl_loss(tboxes, mask, tgt_scores_sum, sxy, strides, dist)
             
             # Class loss (positive samples + negative)
             loss_cls = F.binary_cross_entropy_with_logits(cls, tcls*tscores.unsqueeze(-1), reduction='sum') / tgt_scores_sum
 
-        return pred if not exists(targets) else (pred, {'iou': loss_iou, 'dfl': loss_dfl, 'cls': loss_cls})
+        return pred if not exists(targets) else (pred, {'iou': loss_iou+loss_iou_distill, 'dfl': loss_dfl, 'cls': loss_cls})
     
 class Yolov3(nn.Module):
     def __init__(self, nclasses, spp):

@@ -44,7 +44,11 @@ If you like tiny code, Pytorch and Yolo, then you'll like TinyYolo.
 
 ## Observations ##
 
-* All the ultralytics models and Yolov7 use `eps=0.001` and `momentum=0.03` in `nn.Batchnorm2d`. That's unusual. I wonder what effects that has on training.
+* Pretty much all official models use `eps=0.001` and `momentum=0.03` in `nn.Batchnorm2d`. Those aren't the Pytorch defaults. Where do those numbers come from?
+
+* If my current understanding is correct, there are 2 main inovations in Yolov6:
+    * Model architecture (e.g. CSPRepBiFPANNeck and others)
+    * Distillation loss in bounding box regression: there are two branches for bounding box, one with DFL and one without. AFAIK, only the DFL one gets used in forward pass. During training, both get CIOU loss-ed.
 
 ## TODO ##
 

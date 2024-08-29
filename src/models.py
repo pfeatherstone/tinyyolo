@@ -175,7 +175,7 @@ class RepConv(nn.Module):
         self.act = act
 
     def forward(self, x):
-        id_out = self.bn(x) if exists(self.bn) else 0
+        id_out = self.bn(x) if exists(self.bn) else 0 
         return self.act(self.c1(x) + self.c2(x) + id_out, inplace=True)
 
 class BottleRep(nn.Module):
@@ -278,7 +278,7 @@ class SPPF(nn.Module):
         return self.cv2(torch.cat((x, y1, y2, y3), 1))
 
 class SPPCSPC(nn.Module):
-    def __init__(self, c1, c2, e=0.5, k=(5, 9, 13), act=nn.SiLU(True)):
+    def __init__(self, c1, c2, e=0.5, act=nn.SiLU(True)):
         super().__init__()
         c_   = int(2 * c2 * e)  # hidden channels
         conv = partial(Conv, act=act)
@@ -286,16 +286,19 @@ class SPPCSPC(nn.Module):
         self.cv2 = conv(c1, c_, 1, 1)
         self.cv3 = conv(c_, c_, 3, 1)
         self.cv4 = conv(c_, c_, 1, 1)
-        self.m = nn.ModuleList([nn.MaxPool2d(kernel_size=x, stride=1, padding=x // 2) for x in k])
+        self.m   = nn.MaxPool2d(kernel_size=5, stride=1, padding=2)
         self.cv5 = conv(4 * c_, c_, 1, 1)
         self.cv6 = conv(c_, c_, 3, 1)
         self.cv7 = conv(2 * c_, c2, 1, 1)
 
     def forward(self, x):
+        # TODO for yolov7 might have to reverse weights of cv7
         x1 = self.cv4(self.cv3(self.cv1(x)))
-        y1 = self.cv6(self.cv5(torch.cat([x1] + [m(x1) for m in self.m], 1)))
-        y2 = self.cv2(x)
-        return self.cv7(torch.cat((y1, y2), dim=1))
+        y0 = self.cv2(x)
+        y1 = self.m(x1)
+        y2 = self.m(y1)
+        y3 = self.cv6(self.cv5(torch.cat([x1, y1, y2, self.m(y2)], 1)))
+        return self.cv7(torch.cat((y0, y3), dim=1))
 
 class Attention(nn.Module):
     def __init__(self, dim, num_heads=8, attn_ratio=0.5):
@@ -531,18 +534,18 @@ class EfficientRep(nn.Module):
         self.b0 = RepConv( c1=3,          c2=int(64*w),  s=2, act=F.relu)
         self.b1 = RepConv( c1=int(64*w),  c2=int(128*w), s=2, act=F.relu)
         self.b2 = RepBlock(c1=int(128*w), c2=int(128*w), n=round(6*d))
-        self.b3 = RepConv( c1=int(128*w), c2=int(256*w), s=2)
+        self.b3 = RepConv( c1=int(128*w), c2=int(256*w), s=2, act=F.relu)
         self.b4 = RepBlock(c1=int(256*w), c2=int(256*w), n=round(12*d))
-        self.b5 = RepConv( c1=int(256*w), c2=int(512*w), s=2)
+        self.b5 = RepConv( c1=int(256*w), c2=int(512*w), s=2, act=F.relu)
         self.b6 = RepBlock(c1=int(512*w), c2=int(512*w), n=round(18*d))
-        self.b7 = RepConv( c1=int(512*w), c2=int(1024*w),s=2)
+        self.b7 = RepConv( c1=int(512*w), c2=int(1024*w),s=2, act=F.relu)
         self.b8 = RepBlock(c1=int(1024*w),c2=int(1024*w),n=round(6*d))
         self.b9 = sppf( c1=int(1024*w),c2=int(1024*w), act=nn.ReLU(True))
 
     def forward(self, x):
         x4  = self.b2(self.b1(self.b0(x)))      # p2/4
         x8  = self.b4(self.b3(x4))              # p3/8
-        x16 = self.b6(self.b5(x8))              # p4/16
+        x16 = self.b6(self.b5(x8))              # p4/16 
         x32 = self.b9(self.b8(self.b7(x16)))    # p5/32
         return x4, x8, x16, x32
     
@@ -762,6 +765,42 @@ class CSPRepBiFPANNeck(nn.Module):
         p5  = self.b9(torch.cat([self.b8(p4), a], 1))   # (P5/32-large)
         return p3, p4, p5
     
+def dist2box(dist, sxy, strides):
+    lt, rb  = dist.chunk(2, 2)
+    x1y1    = sxy - lt*strides
+    x2y2    = sxy + rb*strides
+    box     = torch.cat([x1y1,x2y2],-1)
+    return box
+
+@torch.no_grad()
+def make_anchors(feats, strides): # anchor-free
+    xys, strides2 = [], []
+    for x, stride in zip(feats, strides):
+        h, w    = x.shape[2], x.shape[3]
+        sx      = (torch.arange(end=w, device=x.device) + 0.5) * stride
+        sy      = (torch.arange(end=h, device=x.device) + 0.5) * stride
+        sy, sx  = torch.meshgrid(sy, sx, indexing='ij')
+        xy      = rearrange([sx,sy], 'c h w -> (h w) c')
+        xys.append(xy)
+        strides2.append(torch.full((h*w,1), fill_value=stride, device=x.device))
+    return *pack(xys, '* c'), torch.cat(strides2,0)
+
+@torch.no_grad()
+def make_anchors_ab(feats, strides, scales, anchors): # anchor-based
+    xys, awhs, strides2, scales2 = [], [], [], []
+    for x, awh , stride, scale in zip(feats, anchors, strides, scales):
+        a, h, w = awh.shape[0], x.shape[2], x.shape[3]
+        sx      = (torch.arange(end=w, device=x.device) + 0.5) * stride
+        sy      = (torch.arange(end=h, device=x.device) + 0.5) * stride
+        sy, sx  = torch.meshgrid(sy, sx, indexing='ij')
+        xy      = repeat([sx,sy], 'c h w -> (a h w) c', a=a)
+        awh     = repeat(awh, 'a c -> (a h w) c', h=h, w=w)
+        xys.append(xy)
+        awhs.append(awh)
+        strides2.append(torch.full((a*h*w,1), fill_value=stride, device=x.device))
+        scales2.append(torch.full((a*h*w,1), fill_value=scale, device=x.device))
+    return *pack(xys, '* c'), torch.cat(awhs,0), torch.cat(strides2,0), torch.cat(scales,0)
+
 def dfl_loss (
     target_bbox,        # [B,N,4] (input resolution)
     target_mask,        # [B,N]
@@ -803,29 +842,13 @@ class DetectV3(nn.Module):
         self.scales     = scales
         self.v7         = is_v7
 
-    @torch.no_grad()
-    def make_anchors(self, feats):
-        xys, awhs, strides, scales = [], [], [], []
-        for x, awh , stride, scale in zip(feats, self.anchors_wh, self.strides, self.scales):
-            a, h, w = awh.shape[0], x.shape[2], x.shape[3]
-            sx      = (torch.arange(end=w, device=x.device) + 0.5) * stride
-            sy      = (torch.arange(end=h, device=x.device) + 0.5) * stride
-            sy, sx  = torch.meshgrid(sy, sx, indexing='ij')
-            xy      = repeat([sx,sy], 'c h w -> (a h w) c', a=a)
-            awh     = repeat(awh, 'a c -> (a h w) c', h=h, w=w)
-            xys.append(xy)
-            awhs.append(awh)
-            strides.append(torch.full((a*h*w,1), fill_value=stride, device=x.device))
-            scales.append(torch.full((a*h*w,1), fill_value=scale, device=x.device))
-        return *pack(xys, '* c'), torch.cat(awhs,0), torch.cat(strides,0), torch.cat(scales,0)
-
     def to_wh(self, wh, awh):
         match self.v7:
             case True:  return awh * (wh.sigmoid() ** 2) * 4
             case False: return awh * wh.exp()
     
     def forward(self, xs, targets=None):
-        sxy, ps, awh, strides, scales = self.make_anchors(xs)
+        sxy, ps, awh, strides, scales = make_anchors_ab(xs, self.strides, self.scales, self.anchors_wh)
         feats           = [rearrange(n(x), 'b (a f) h w -> b (a h w) f', f=self.nc+5) for x,n in zip(xs, self.cv)]
         xy, wh, l, cls  = torch.cat(feats,1).split((2,2,1,self.nc), -1) 
         xy              = strides * ((xy.sigmoid() - 0.5) * scales) + sxy
@@ -852,13 +875,6 @@ class DetectV3(nn.Module):
 
         return pred if not exists(targets) else (pred, {'iou': loss_iou, 'cls': loss_cls, 'obj': loss_obj})
 
-def dist2box(dist, sxy, strides):
-    lt, rb  = dist.chunk(2, 2)
-    x1y1    = sxy - lt*strides
-    x2y2    = sxy + rb*strides
-    box     = torch.cat([x1y1,x2y2],-1)
-    return box
-
 class Detect(nn.Module):
     def __init__(self, nc=80, ch=()):
         super().__init__()
@@ -871,22 +887,9 @@ class Detect(nn.Module):
         self.cv2        = nn.ModuleList(nn.Sequential(Conv(x, self.c2, 3), Conv(self.c2, self.c2, 3), nn.Conv2d(self.c2, 4 * self.reg_max, 1)) for x in ch)
         self.cv3        = nn.ModuleList(nn.Sequential(Conv(x, self.c3, 3), Conv(self.c3, self.c3, 3), nn.Conv2d(self.c3, self.nc, 1)) for x in ch)
         self.r          = nn.Parameter(torch.arange(self.reg_max).float(), requires_grad=False)
-
-    @torch.no_grad()
-    def make_anchors(self, feats):
-        xys, strides = [], []
-        for x, stride in zip(feats, self.strides):
-            h, w    = x.shape[2], x.shape[3]
-            sx      = (torch.arange(end=w, device=x.device) + 0.5) * stride
-            sy      = (torch.arange(end=h, device=x.device) + 0.5) * stride
-            sy, sx  = torch.meshgrid(sy, sx, indexing='ij')
-            xy      = rearrange([sx,sy], 'c h w -> (h w) c')
-            xys.append(xy)
-            strides.append(torch.full((h*w,1), fill_value=stride, device=x.device))
-        return *pack(xys, '* c'), torch.cat(strides,0)
-    
+  
     def forward(self, xs, targets=None):
-        sxy, ps, strides = self.make_anchors(xs)
+        sxy, ps, strides = make_anchors(xs, self.strides)
         feats       = [rearrange(torch.cat((c1(x), c2(x)), 1), 'b f h w -> b (h w) f') for x,c1,c2 in zip(xs, self.cv2, self.cv3)]
         dist, cls   = torch.cat(feats, 1).split((4 * self.reg_max, self.nc), -1)
         dist        = rearrange(dist, 'b n (k r) -> b n k r', k=4)
@@ -947,22 +950,9 @@ class DetectV6(nn.Module):
         self.reg_preds_dist = nn.ModuleList([nn.Conv2d(c, 4*(self.na + self.reg_max), kernel_size=1) for c in ch])
         self.reg_preds      = nn.ModuleList([nn.Conv2d(c, 4*(self.na),                kernel_size=1) for c in ch]) if distill else None
         self.r              = nn.Parameter(torch.arange(self.reg_max+1).float(), requires_grad=False) if use_dfl else None
-
-    @torch.no_grad()
-    def make_anchors(self, feats):
-        xys, strides = [], []
-        for x, stride in zip(feats, self.strides):
-            h, w    = x.shape[2], x.shape[3]
-            sx      = (torch.arange(end=w, device=x.device) + 0.5) * stride
-            sy      = (torch.arange(end=h, device=x.device) + 0.5) * stride
-            sy, sx  = torch.meshgrid(sy, sx, indexing='ij')
-            xy      = rearrange([sx,sy], 'c h w -> (h w) c')
-            xys.append(xy)
-            strides.append(torch.full((h*w,1), fill_value=stride, device=x.device))
-        return *pack(xys, '* c'), torch.cat(strides,0)
     
     def forward(self, xs, targets=None):
-        sxy, ps, strides = self.make_anchors(xs)
+        sxy, ps, strides = make_anchors(xs, self.strides)
         xs          = [l(x) for l,x in zip(self.stems, xs)]
         cls         = torch.cat([rearrange(c2(c1(x)), 'b f h w -> b (h w) f') for c1,c2,x in zip(self.cls_convs, self.cls_preds, xs)], 1)
         reg         = [c1(x) for c1,x in zip(self.reg_convs, xs)]
@@ -1228,11 +1218,10 @@ def load_yolov6(net: Yolov6, weights_pt: str):
     state = torch.load(weights_pt, map_location='cpu', weights_only=True)
     del state['detect.proj']
     del state['detect.proj_conv.weight']
-    # state = {k:v for k,v in state.items() if 'backbone' in k or 'neck' in k}
     assert (nP1 := sum(p.numel() for p in params(net))) == (nP2 := sum(p.numel() for p in state.values())), f"{nP1} != {nP2}"
 
     for p1, (k, p2) in zip(params(net), state.items(), strict=True):
-        # print(f"shape: {k} {p2.shape} {p1.shape}")
+        print(f"shape: {k} {p2.shape} {p1.shape}")
         assert p1.shape == p2.shape, f"bad shape: {k} {p2.shape} {p1.shape}"
         p1.data.copy_(p2.data)
 

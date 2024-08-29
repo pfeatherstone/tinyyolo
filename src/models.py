@@ -297,8 +297,9 @@ class SPPCSPC(nn.Module):
         y0 = self.cv2(x)
         y1 = self.m(x1)
         y2 = self.m(y1)
-        y3 = self.cv6(self.cv5(torch.cat([x1, y1, y2, self.m(y2)], 1)))
-        return self.cv7(torch.cat((y0, y3), dim=1))
+        y3 = self.m(y2)
+        y4 = self.cv6(self.cv5(torch.cat([x1, y1, y2, y3], 1)))
+        return self.cv7(torch.cat((y0, y4), dim=1))
 
 class Attention(nn.Module):
     def __init__(self, dim, num_heads=8, attn_ratio=0.5):
@@ -713,13 +714,10 @@ class BiFusion(nn.Module):
         self.cv2 = Conv(c1[1], c2, 1, 1, act=nn.ReLU(True))
         self.cv3 = Conv(c2*3,  c2, 1, 1, act=nn.ReLU(True))
         self.up  = nn.ConvTranspose2d(c2, c2, kernel_size=2, stride=2, bias=True)
-        self.do  = Conv(c2, c2, k=3, s=2)
+        self.do  = Conv(c2, c2, k=3, s=2, act=nn.ReLU(True))
 
     def forward(self, x):
-        x0 = self.up(x[0])
-        x1 = self.cv1(x[1])
-        x2 = self.do(self.cv2(x[2]))
-        return self.cv3(torch.cat((x0, x1, x2), dim=1))
+        return self.cv3(torch.cat(( self.up(x[0]), self.cv1(x[1]), self.do(self.cv2(x[2]))), dim=1))
     
 class RepBiFPANNeck(nn.Module):
     def __init__(self, w, d):

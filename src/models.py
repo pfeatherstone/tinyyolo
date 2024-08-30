@@ -557,11 +557,11 @@ class CSPBepBackbone(nn.Module):
         self.b0 = RepConv(c1=3,          c2=int(64*w),  s=2, act=F.relu)
         self.b1 = RepConv(c1=int(64*w),  c2=int(128*w), s=2, act=F.relu)
         self.b2 = BepC3(  c1=int(128*w), c2=int(128*w), e=csp_e, n=round(6*d))
-        self.b3 = RepConv(c1=int(128*w), c2=int(256*w), s=2)
+        self.b3 = RepConv(c1=int(128*w), c2=int(256*w), s=2, act=F.relu)
         self.b4 = BepC3(  c1=int(256*w), c2=int(256*w), e=csp_e, n=round(12*d))
-        self.b5 = RepConv(c1=int(256*w), c2=int(512*w), s=2)
+        self.b5 = RepConv(c1=int(256*w), c2=int(512*w), s=2, act=F.relu)
         self.b6 = BepC3(  c1=int(512*w), c2=int(512*w), e=csp_e, n=round(18*d))
-        self.b7 = RepConv(c1=int(512*w), c2=int(1024*w),s=2)
+        self.b7 = RepConv(c1=int(512*w), c2=int(1024*w),s=2, act=F.relu)
         self.b8 = BepC3(  c1=int(1024*w),c2=int(1024*w),e=csp_e, n=round(6*d))
         self.b9 = sppf(   c1=int(1024*w),c2=int(1024*w), act=nn.ReLU(True))
 
@@ -958,7 +958,7 @@ class DetectV6(nn.Module):
         ltrb        = torch.einsum('bnkr, r -> bnk', dist.softmax(-1), self.r)
         box         = dist2box(ltrb, sxy, strides)
         ltrb        = torch.cat([rearrange(c2(x), 'b k h w -> b (h w) k') for c2,x in zip(self.reg_preds, reg)], 1) if exists(self.reg_preds) else None
-        box_distill = dist2box(ltrb, sxy, strides)
+        box_distill = dist2box(ltrb, sxy, strides) if exists(ltrb) else None
         pred        = torch.cat((box, cls.sigmoid()), -1)
 
         if exists(targets):
@@ -973,7 +973,7 @@ class DetectV6(nn.Module):
             tgt_scores_sum = max(tscores.sum(), 1)
             weight           = tscores[mask]
             loss_iou         = (torchvision.ops.complete_box_iou_loss(box[mask],         tboxes[mask], reduction='none') * weight).sum() / tgt_scores_sum
-            loss_iou_distill = (torchvision.ops.complete_box_iou_loss(box_distill[mask], tboxes[mask], reduction='none') * weight).sum() / tgt_scores_sum
+            loss_iou_distill = (torchvision.ops.complete_box_iou_loss(box_distill[mask], tboxes[mask], reduction='none') * weight).sum() / tgt_scores_sum if exists(box_distill) else 0
             
             # DFL loss (positive samples)
             loss_dfl = dfl_loss(tboxes, mask, tgt_scores_sum, sxy, strides, dist)

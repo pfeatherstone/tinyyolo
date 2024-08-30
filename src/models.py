@@ -292,7 +292,6 @@ class SPPCSPC(nn.Module):
         self.cv7 = conv(2 * c_, c2, 1, 1)
 
     def forward(self, x):
-        # TODO for yolov7 might have to reverse weights of cv7
         x1 = self.cv4(self.cv3(self.cv1(x)))
         y0 = self.cv2(x)
         y1 = self.m(x1)
@@ -797,7 +796,7 @@ def make_anchors_ab(feats, strides, scales, anchors): # anchor-based
         awhs.append(awh)
         strides2.append(torch.full((a*h*w,1), fill_value=stride, device=x.device))
         scales2.append(torch.full((a*h*w,1), fill_value=scale, device=x.device))
-    return *pack(xys, '* c'), torch.cat(awhs,0), torch.cat(strides2,0), torch.cat(scales,0)
+    return *pack(xys, '* c'), torch.cat(awhs,0), torch.cat(strides2,0), torch.cat(scales2,0)
 
 def dfl_loss (
     target_bbox,        # [B,N,4] (input resolution)
@@ -1118,112 +1117,6 @@ class Yolov6(nn.Module):
         x = self.net(x)
         x = self.fpn(*x)
         return self.head(x)
-    
-def load_from_ultralytics(net: Union[Yolov5, Yolov8, Yolov10]):
-    from ultralytics import YOLO
-
-    if isinstance(net, Yolov5):
-        net2 = YOLO('yolov5{}u.pt'.format(net.v)).model.eval()
-        assert (nP1 := count_parameters(net)) == (nP2 := count_parameters(net2)), f'wrong number of parameters net {nP1} vs ultralytics {nP2}'
-        copy_params(net.net, net2.model[0:10])
-        copy_params(net.fpn, net2.model[10:24])
-        copy_params(net.head.cv2, net2.model[24].cv2)
-        copy_params(net.head.cv3, net2.model[24].cv3)
-
-    elif isinstance(net, Yolov8):
-        net2 = YOLO('yolov8{}.pt'.format(net.v)).model.eval()
-        assert (nP1 := count_parameters(net)) == (nP2 := count_parameters(net2)), 'wrong number of parameters net {} vs ultralytics {}'.format(nP1, nP2)
-        copy_params(net.net, net2.model[0:10])
-        copy_params(net.fpn, net2.model[10:22])
-        copy_params(net.head.cv2, net2.model[22].cv2)
-        copy_params(net.head.cv3, net2.model[22].cv3)
-    
-    elif isinstance(net, Yolov10):
-        net2 = YOLO('yolov10{}.pt'.format(net.v)).model.eval()
-        assert (nP1 := count_parameters(net)) == (nP2 := count_parameters(net2)), 'wrong number of parameters net {} vs ultralytics {}'.format(nP1, nP2)
-        copy_params(net.net, net2.model[0:11])
-        copy_params(net.fpn, net2.model[11:23])
-        copy_params(net.head.cv2, net2.model[23].cv2)
-        copy_params(net.head.cv3, net2.model[23].cv3)
-        copy_params(net.head.one2one_cv2, net2.model[23].one2one_cv2)
-        copy_params(net.head.one2one_cv3, net2.model[23].one2one_cv3)
-    
-def load_darknet(net: Union[Yolov3, Yolov3Tiny, Yolov4, Yolov4Tiny], weights_path: str):
-    with open(weights_path, "rb") as f:
-        major, minor, _ = np.fromfile(f, dtype=np.int32, count=3)
-        steps = np.fromfile(f, count=1, dtype=np.int64 if (major * 10 + minor) >= 2 and major < 1000 and minor < 1000 else np.int32)
-        offset = f.tell()
-
-        # Get all weights
-        weights = []
-        for block in net.layers():
-            for m in block.modules():
-                if isinstance(m, nn.Conv2d):
-                    weights.append([m.bias, m.weight] if exists(m.bias) else [m.weight])
-                if isinstance(m, nn.BatchNorm2d):
-                    conv_weights = weights.pop()
-                    weights.append([m.bias, m.weight, m.running_mean, m.running_var])
-                    weights.append(conv_weights)
-
-        # Load all weights
-        for w in weights:
-            for wi in w:
-                wi.data.copy_(torch.from_numpy(np.fromfile(f, dtype=np.float32, count=wi.numel())).view_as(wi))
-
-        assert (nP1 := count_parameters(net) * 4) == (nP2 := f.tell() - offset), f"{nP1} != {nP2}"
-
-def load_yolov7(net: Yolov7, weights_pt: str):
-    def params1():
-        for l in net.layers():
-            for k, v in l.state_dict().items():
-                if 'anchor' not in k:
-                    yield v
-    
-    def params2():
-        state2 = torch.load(weights_pt, map_location='cpu')
-        for k, v in state2.items():
-            if 'anchor' not in k:
-                yield v
-
-    for p1, p2 in zip(params1(), params2(), strict=True):
-        p1.data.copy_(p2.data)
-
-    init_batchnorms(net)
-
-def load_yolov6(net: Yolov6, weights_pt: str):
-    def params(n):
-        # Handle special modules (we've ordered submodules differently)
-        if isinstance(n, RepConv):
-            if n.bn is not None:
-                yield from params(n.bn)
-            yield from params(n.c1)
-            yield from params(n.c2)
-        elif isinstance(n, BottleRep):
-            if isinstance(n.alpha, nn.Parameter):
-                yield n.alpha
-            yield from params(n.conv1)
-            yield from params(n.conv2)
-        # Loop through children recursively
-        else:
-            has_children = False
-            for m in n.children():
-                has_children = True
-                yield from params(m)
-            # No children, yield parameters
-            if not has_children:
-                yield from n.state_dict().values() 
-    
-    state = torch.load(weights_pt, map_location='cpu', weights_only=True)
-    del state['detect.proj']
-    del state['detect.proj_conv.weight']
-    assert (nP1 := sum(p.numel() for p in params(net))) == (nP2 := sum(p.numel() for p in state.values())), f"{nP1} != {nP2}"
-
-    for p1, (k, p2) in zip(params(net), state.items(), strict=True):
-        print(f"shape: {k} {p2.shape} {p1.shape}")
-        assert p1.shape == p2.shape, f"bad shape: {k} {p2.shape} {p1.shape}"
-        p1.data.copy_(p2.data)
-
-    init_batchnorms(net)
 
 @torch.no_grad()
 def nms(preds: torch.Tensor, conf_thresh: float, nms_thresh: float , has_objectness: bool):

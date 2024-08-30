@@ -889,9 +889,9 @@ class Detect(nn.Module):
         self.cv3        = nn.ModuleList(nn.Sequential(Conv(x, self.c3, 3), Conv(self.c3, self.c3, 3), nn.Conv2d(self.c3, self.nc, 1)) for x in ch)
         self.r          = nn.Parameter(torch.arange(self.reg_max).float(), requires_grad=False)
   
-    def forward(self, xs, targets=None):
+    def forward_private(self, xs, cv2, cv3, targets=None):
         sxy, ps, strides = make_anchors(xs, self.strides)
-        feats       = [rearrange(torch.cat((c1(x), c2(x)), 1), 'b f h w -> b (h w) f') for x,c1,c2 in zip(xs, self.cv2, self.cv3)]
+        feats       = [rearrange(torch.cat((c1(x), c2(x)), 1), 'b f h w -> b (h w) f') for x,c1,c2 in zip(xs, cv2, cv3)]
         dist, cls   = torch.cat(feats, 1).split((4 * self.reg_max, self.nc), -1)
         dist        = rearrange(dist, 'b n (k r) -> b n k r', k=4)
         ltrb        = torch.einsum('bnkr, r -> bnk', dist.softmax(-1), self.r)
@@ -919,6 +919,9 @@ class Detect(nn.Module):
 
         return pred if not exists(targets) else (pred, {'iou': loss_iou, 'dfl': loss_dfl, 'cls': loss_cls})
         
+    def forward(self, xs, targets=None):
+        return self.forward_private(xs, self.cv2, self.cv3, targets)
+    
 class DetectV10(Detect):
     def __init__(self, nc=80, ch=()):
         super().__init__(nc, ch)
@@ -934,7 +937,7 @@ class DetectV10(Detect):
     
     def forward(self, x):
         # TODO: implement all the topk stuff. I think yolov10 doesn't need NMS. But you can you use it in inference mode for now.
-        return self.inference(self.forward_feat(x, self.one2one_cv2, self.one2one_cv3))
+        return self.forward_private(x, self.one2one_cv2, self.one2one_cv3)
 
 class DetectV6(nn.Module):
     def __init__(self, nc=80, ch=(), use_dfl=False, distill=False):

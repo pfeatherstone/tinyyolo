@@ -21,6 +21,7 @@ wget https://github.com/ultralytics/assets/releases/download/v8.2.0/yolov10b.pt 
 wget https://github.com/ultralytics/assets/releases/download/v8.2.0/yolov10l.pt -P weights
 wget https://github.com/ultralytics/assets/releases/download/v8.2.0/yolov10x.pt -P weights
 
+# Yolov7 massaging
 git clone https://github.com/WongKinYiu/yolov7.git
 cd yolov7
 wget https://github.com/WongKinYiu/yolov7/releases/download/v0.1/yolov7.pt
@@ -30,15 +31,18 @@ python3 script.py
 cd ..
 rm -rf yolov7
 
+# Yolov6 massaging
 git clone https://github.com/meituan/YOLOv6
 cd YOLOv6
 
+rm -f model.txt
+rm -f script.py
 echo "import sys" >> script.py
 echo "import torch" >> script.py
-echo "d = torch.load(sys.argv[1], map_location='cpu')" >> script.py
-# echo "f = open('model.txt', 'w')" >> script.py
-# echo "f.write(str(d['model']))" >> script.py
-# echo "f.close()" >> script.py
+echo "d = torch.load(sys.argv[1], map_location='cpu', weights_only=False)" >> script.py
+echo "f = open('model.txt', 'w')" >> script.py
+echo "f.write(str(d['model']))" >> script.py
+echo "f.close()" >> script.py
 echo "torch.save(d['model'].state_dict(), f'../weights/{sys.argv[1]}')" >> script.py
 
 wget https://github.com/meituan/YOLOv6/releases/download/0.4.0/yolov6n.pt

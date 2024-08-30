@@ -1079,10 +1079,10 @@ class Yolov5(nn.Module):
         self.fpn  = HeadV5(w, r, d)
         self.head = Detect(num_classes, ch=(int(256*w), int(512*w), int(512*w*2)))
 
-    def forward(self, x):
+    def forward(self, x, targets=None):
         x = self.net(x)
         x = self.fpn(*x)
-        return self.head(x)
+        return self.head(x, targets)
 
 class Yolov8(nn.Module):
     def __init__(self, variant, num_classes):
@@ -1120,10 +1120,10 @@ class Yolov6(nn.Module):
         self.fpn  = CSPRepBiFPANNeck(w, d, csp_e=csp_e) if csp else RepBiFPANNeck(w, d)
         self.head = DetectV6(num_classes, ch=(int(128*w), int(256*w), int(512*w)), use_dfl=True, distill=distill)
 
-    def forward(self, x):
+    def forward(self, x, targets=None):
         x = self.net(x)
         x = self.fpn(*x)
-        return self.head(x)
+        return self.head(x, targets)
 
 @torch.no_grad()
 def nms(preds: torch.Tensor, conf_thresh: float, nms_thresh: float , has_objectness: bool):

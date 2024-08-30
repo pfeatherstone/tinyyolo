@@ -16,7 +16,7 @@ If you like tiny code, Pytorch and Yolo, then you'll like TinyYolo.
 
 * `models.py`: contains all the Yolo models, which automatically calculate loss when targets are provided in forward function.
 * `assigner.cpp`: contains various sample assignment algorithms written in pure Pytorch C++
-* `test.py`: tests the models with pretrained weights from darknet, ultralytics and Yolov7.
+* `test.py`: tests the models with pretrained weights from darknet, ultralytics, Yolov6 and Yolov7 official repos.
 * `train_coco.py`: an example training script that trains on COCO using [lightning](https://lightning.ai/)
 
 ## Models ##
@@ -27,6 +27,7 @@ If you like tiny code, Pytorch and Yolo, then you'll like TinyYolo.
 - [x] Yolov4
 - [x] Yolov4-tiny
 - [x] Yolov5(n,s,m,l,x)
+- [x] Yolov6(n,s,m)
 - [x] Yolov7
 - [x] Yolov8(n,s,m,l,x)
 - [x] Yolov10(n,s,m,b,l,x)
@@ -46,9 +47,7 @@ If you like tiny code, Pytorch and Yolo, then you'll like TinyYolo.
 
 * Pretty much all official models use `eps=0.001` and `momentum=0.03` in `nn.Batchnorm2d`. Those aren't the Pytorch defaults. Where do those numbers come from?
 
-* If my current understanding is correct, there are 2 main inovations in Yolov6:
-    * Model architecture (e.g. CSPRepBiFPANNeck and others)
-    * Distillation loss in bounding box regression: there are two branches for bounding box, one with DFL and one without. AFAIK, only the DFL one gets used in forward pass. During training, both get CIOU loss-ed.
+* From what I can tell the main innovation in yolov6 is the distillation loss in bounding box regression: there are two branches for bounding box, one with DFL and one without. AFAIK, only the DFL one gets used in forward pass. During training, both get CIOU loss-ed.
 
 ## TODO ##
 
@@ -57,5 +56,4 @@ If you like tiny code, Pytorch and Yolo, then you'll like TinyYolo.
 - [ ] API docs + examples (in README)
 - [ ] Add examples for ONNX export, TFLITE export.
 - [ ] Explore how to compile models. Try TVM, onnx-mlir, TinyGrad (export to ONNX, load into tinygrad, then export LLVM or C code then compile)
-- [ ] Add Yolov6
 - [ ] Maybe add Yolov9

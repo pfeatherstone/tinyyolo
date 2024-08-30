@@ -1,9 +1,4 @@
 mkdir weights
-wget https://pjreddie.com/media/files/yolov3-tiny.weights -P weights
-wget https://pjreddie.com/media/files/yolov3.weights -P weights
-wget https://github.com/AlexeyAB/darknet/releases/download/darknet_yolo_v4_pre/yolov4.weights -P weights
-wget https://github.com/AlexeyAB/darknet/releases/download/yolov4/yolov4-tiny.weights -P weights
-wget https://github.com/ultralytics/yolov3/releases/download/v8/yolov3-spp.weights -P weights
 wget https://github.com/ultralytics/assets/releases/download/v8.2.0/yolov5nu.pt -P weights
 wget https://github.com/ultralytics/assets/releases/download/v8.2.0/yolov5su.pt -P weights
 wget https://github.com/ultralytics/assets/releases/download/v8.2.0/yolov5mu.pt -P weights

@@ -1,12 +1,19 @@
-import  time
+import  os
 import  torch
 import  torchvision
-import  torchvision.transforms.functional as vF
-import  matplotlib.pyplot as plt
 from    models import *
 
+weight_paths = {
+    'yolov3-tiny'   : 'https://pjreddie.com/media/files/yolov3-tiny.weights',
+    'yolov3'        : 'https://pjreddie.com/media/files/yolov3.weights',
+    'yolov3-spp'    : 'https://github.com/ultralytics/yolov3/releases/download/v8/yolov3-spp.weights',
+    'yolov4'        : 'https://github.com/AlexeyAB/darknet/releases/download/darknet_yolo_v4_pre/yolov4.weights',
+    'yolov4-tiny'   : 'https://github.com/AlexeyAB/darknet/releases/download/yolov4/yolov4-tiny.weights',
+}
 
-torch.set_printoptions(5)
+def download_if_not_exist(model_type: str, filepath: str):
+    if not os.path.exists(filepath):
+        torch.hub.download_url_to_file(weight_paths[model_type], filepath)
 
 
 def load_from_darknet(net: Union[Yolov3, Yolov3Tiny, Yolov4, Yolov4Tiny], weights_path: str):
@@ -126,6 +133,8 @@ def load_from_yolov7_official(net: Yolov7, weights_pt: str):
 
 
 def test(type: str, size: str = ''):
+    os.makedirs('../weights', exist_ok=True)
+
     match type:
         case 'yolov3' :     net = Yolov3(80, False).eval()
         case 'yolov3-spp':  net = Yolov3(80, True).eval()
@@ -147,7 +156,9 @@ def test(type: str, size: str = ''):
         has_obj = False
     
     elif 'yolov3' in type or 'yolov4' in type :
-        load_from_darknet(net, '../weights/{}.weights'.format(type))
+        filepath = '../weights/{}.weights'.format(type)
+        download_if_not_exist(type, filepath)
+        load_from_darknet(net, filepath)
     
     elif type == 'yolov6':
         load_from_yolov6_official(net, "../weights/yolov6{}.pt".format(size))

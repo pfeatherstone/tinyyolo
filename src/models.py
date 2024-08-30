@@ -451,15 +451,21 @@ class BackboneV7(nn.Module):
     def __init__(self):
         super().__init__()
         self.b0 = nn.Sequential(Conv(3, 32, 3), Conv(32, 64, 3, s=2), Conv(64, 64, 3))
-        self.b1 = nn.Sequential(Conv(64, 128, 3, s=2), ElanBlock(128, mr=0.5, br=0.5, nb=2, nc=2))
-        self.b2 = nn.Sequential(MaxPoolAndStrideConv(256), ElanBlock(256, mr=0.5, br=0.5, nb=2, nc=2))
-        self.b3 = nn.Sequential(MaxPoolAndStrideConv(512), ElanBlock(512, mr=0.5, br=0.5, nb=2, nc=2))
-        self.b4 = nn.Sequential(MaxPoolAndStrideConv(1024), ElanBlock(1024, mr=0.25, br=0.25, nb=2, nc=2, cout=1024))
+        self.b1 = Conv(64, 128, 3, s=2)
+        self.b2 = ElanBlock(128, mr=0.5, br=0.5, nb=2, nc=2)
+        self.b3 = MaxPoolAndStrideConv(256)
+        self.b4 = ElanBlock(256, mr=0.5, br=0.5, nb=2, nc=2)
+        self.b5 = MaxPoolAndStrideConv(512)
+        self.b6 = ElanBlock(512, mr=0.5, br=0.5, nb=2, nc=2)
+        self.b7 = MaxPoolAndStrideConv(1024)
+        self.b8 = ElanBlock(1024, mr=0.25, br=0.25, nb=2, nc=2, cout=1024)
+        self.b9 = SPPCSPC(1024, 512)
+
     def forward(self, x):
-        p8  = self.b2(self.b1(self.b0(x)))
-        p16 = self.b3(p8)
-        p32 = self.b4(p16)
-        return p8, p16, p32
+        x4 = self.b4(self.b3(self.b2(self.b1(self.b0(x))))) # 4 P3/8
+        x6 = self.b6(self.b5(x4))                           # 6 P4/16
+        x9 = self.b9(self.b8(self.b7(x6)))                  # 9 P5/32
+        return x4, x6, x9
 
 class BackboneV5(nn.Module):
     def __init__(self, w, r, d):
@@ -620,7 +626,6 @@ class HeadV4(nn.Module):
 class HeadV7(nn.Module):
     def __init__(self):
         super().__init__() # ordering of layers is set to ease loading of original Yolov7 weigths
-        self.c13 = SPPCSPC(1024, 512)
         self.c14 = Conv(512, 256, 1)
         self.c12 = Conv(1024, 256, 1)
         self.c17 = ElanBlock(512, mr=0.5, br=0.25, nb=4, nc=1, cout=256)
@@ -633,13 +638,12 @@ class HeadV7(nn.Module):
         self.c26 = ElanBlock(1024, mr=0.5, br=0.25, nb=4, nc=1, cout=512)
 
     def forward(self, p8, p16, p32):
-        x13 = self.c13(p32)
-        x16 = torch.cat((self.c12(p16), F.interpolate(self.c14(x13), scale_factor=2)), 1)
+        x16 = torch.cat((self.c12(p16), F.interpolate(self.c14(p32), scale_factor=2)), 1)
         x17 = self.c17(x16)
         x20 = torch.cat((self.c11(p8), F.interpolate(self.c18(x17), scale_factor=2)), 1)
         xxx = self.cxx(x20)
         x23 = self.c23(torch.cat((self.c21(xxx), x17), 1))
-        x26 = self.c26(torch.cat((self.c24(x23), x13), 1))
+        x26 = self.c26(torch.cat((self.c24(x23), p32), 1))
         return xxx, x23, x26
 
 class HeadV5(nn.Module):

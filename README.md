@@ -37,6 +37,50 @@ If you like tiny code, Pytorch and Yolo, then you'll like TinyYolo.
 - [x] [ATSS](https://arxiv.org/pdf/1912.02424)
 - [x] [TAL](https://arxiv.org/pdf/2108.07755)
 
+## Example ##
+
+```
+net = Yolov3(80, spp=True).eval()
+# net = Yolov4(80).eval()
+# net = Yolov5('n', 80).eval()
+# net = Yolov6('n', 80).eval()
+# net = Yolov7(80).eval()
+# net = Yolov8('n', 80).eval()
+# net = Yolov10('n', 80).eval()
+
+# Inference only
+x = torch.randn(4, 3, 640, 640) # image-like
+preds = net(x) # preds.shape == [4, N, 85] or 84 if there's no objectness feature e.g V5, V6, V8, V10
+
+# Train
+D = ... # max number of target detections per batch
+C = 5   # target features [x1,y1,x2,y2,cls] where cls == -1 is used for padding
+targets = torch.randn(4, D, C)
+preds, loss_dict = net(x, targets)
+
+```
+
+## Export ##
+
+### ONNX ###
+
+```
+net = Yolov3(80, spp=True).eval()
+# net = Yolov4(80).eval()
+# net = Yolov5('n', 80).eval()
+# net = Yolov6('n', 80).eval()
+# net = Yolov7(80).eval()
+# net = Yolov8('n', 80).eval()
+# net = Yolov10('n', 80).eval()
+
+x = torch.randn(4, 3, 640, 640)
+_ = net(x) # compile all the einops kernels. Required before ONNX export
+torch.onnx.export(net, (x,), '/tmp/model.onnx',
+                  input_names=['img'], output_names=['preds'],
+                  dynamic_axes={'img'   : {0: 'B', 2: 'H', 3: 'W'},
+                                'preds' : {0: 'B', 1: 'N'}})
+```
+
 ## Notes ##
 
 - I advise using [lightning](https://lightning.ai/) or [accelerate](https://huggingface.co/docs/accelerate/index) to write training scripts. They take care of everything including distributed training, FP16, checkpointing, etc.

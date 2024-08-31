@@ -137,24 +137,6 @@ def SCDown(c1, c2, k, s):
     
 def MaxPool(stride):
     return nn.Sequential(nn.ZeroPad2d((0,1,0,1)), nn.MaxPool2d(kernel_size=2, stride=stride))
-
-class CspBlock(nn.Module):
-    def __init__(self, c1, c2, f=1, e=1, act=actV3, n=1):
-        super().__init__()
-        conv    = partial(Conv, act=act)
-        c_      = int(c2 * f)  # hidden channels
-        self.d  = conv(c1, c_, 3, s=2)
-        self.c1 = conv(c_, c2, 1)
-        self.c2 = conv(c_, c2, 1)
-        self.m  = Repeat(Bottleneck(c2, e=e, k=(1,3), act=act), n)
-        self.c3 = conv(c2, c2, 1)
-        self.c4 = conv(2*c2, c_, 1)
-    def forward(self, x):
-        x = self.d(x)
-        a = self.c1(x)
-        b = self.c3(self.m(self.c2(x)))
-        x = self.c4(torch.cat([b, a], 1))
-        return x
     
 class RepVGGDW(torch.nn.Module):
     def __init__(self, ed):
@@ -199,6 +181,24 @@ def BottleRepBlock(c1, c2, n=1):
     block = partial(BottleRep, weight=True)
     return nn.Sequential(block(c1, c2), *[block(c2, c2) for _ in range(n - 1)])
 
+class CspBlock(nn.Module):
+    def __init__(self, c1, c2, f=1, e=1, act=actV3, n=1):
+        super().__init__()
+        conv    = partial(Conv, act=act)
+        c_      = int(c2 * f)  # hidden channels
+        self.d  = conv(c1, c_, 3, s=2)
+        self.c1 = conv(c_, c2, 1)
+        self.c2 = conv(c_, c2, 1)
+        self.m  = Repeat(Bottleneck(c2, e=e, k=(1,3), act=act), n)
+        self.c3 = conv(c2, c2, 1)
+        self.c4 = conv(2*c2, c_, 1)
+    def forward(self, x):
+        x = self.d(x)
+        a = self.c1(x)
+        b = self.c3(self.m(self.c2(x)))
+        x = self.c4(torch.cat([b, a], 1))
+        return x
+        
 class C2f(nn.Module):
     def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):  # ch_in, ch_out, number, shortcut, groups, expansion
         super().__init__()
@@ -338,18 +338,18 @@ class Darknet53(nn.Module):
         super().__init__()
         conv = partial(Conv, act=actV3)
         res  = partial(Bottleneck, act=actV3, k=(1, 3))
-        self.conv   = conv(3, 32, 3)
-        self.block1 = nn.Sequential(conv( 32,   64, 3, 2), res(64))
-        self.block2 = nn.Sequential(conv( 64,  128, 3, 2), Repeat(res(128), 2))
-        self.block3 = nn.Sequential(conv(128,  256, 3, 2), Repeat(res(256), 8))
-        self.block4 = nn.Sequential(conv(256,  512, 3, 2), Repeat(res(512), 8))
-        self.block5 = nn.Sequential(conv(512, 1024, 3, 2), Repeat(res(1024),4))
+        self.stem = conv(3, 32, 3)
+        self.b1   = nn.Sequential(conv( 32,   64, 3, 2), res(64))
+        self.b2   = nn.Sequential(conv( 64,  128, 3, 2), Repeat(res(128), 2))
+        self.b3   = nn.Sequential(conv(128,  256, 3, 2), Repeat(res(256), 8))
+        self.b4   = nn.Sequential(conv(256,  512, 3, 2), Repeat(res(512), 8))
+        self.b5   = nn.Sequential(conv(512, 1024, 3, 2), Repeat(res(1024),4))
     def forward(self, x):
-        x8  = self.block3(self.block2(self.block1(self.conv(x))))
-        x16 = self.block4(x8)
-        x32 = self.block5(x16)
-        return x8, x16, x32
-
+        p8  = self.b3(self.b2(self.b1(self.stem(x))))
+        p16 = self.b4(p8)
+        p32 = self.b5(p16)
+        return p8, p16, p32
+    
 class BackboneV3Tiny(nn.Module):
     def __init__(self):
         super().__init__()

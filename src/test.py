@@ -1,7 +1,19 @@
 import  os
 import  torch
 import  torchvision
+import  onnxruntime as ort
 from    models import *
+
+class bcolors:
+    HEADER      = '\033[95m'
+    OKBLUE      = '\033[94m'
+    OKCYAN      = '\033[96m'
+    OKGREEN     = '\033[92m'
+    WARNING     = '\033[93m'
+    FAIL        = '\033[91m'
+    ENDC        = '\033[0m'
+    BOLD        = '\033[1m'
+    UNDERLINE   = '\033[4m'
 
 weight_paths = {
     'yolov3-tiny'   : 'https://pjreddie.com/media/files/yolov3-tiny.weights',
@@ -132,39 +144,39 @@ def load_from_yolov7_official(net: Yolov7, weights_pt: str):
             layer.weight.data.copy_(torch.cat([weight[1], weight[0]], 1))
 
 
-def test(type: str, size: str = ''):
+def test(model: str, variant: str = ''):
     os.makedirs('../weights', exist_ok=True)
 
-    match type:
+    match model:
         case 'yolov3' :     net = Yolov3(80, False).eval()
         case 'yolov3-spp':  net = Yolov3(80, True).eval()
         case 'yolov3-tiny': net = Yolov3Tiny(80).eval()
         case 'yolov4':      net = Yolov4(80).eval()
         case 'yolov4-tiny': net = Yolov4Tiny(80).eval()
-        case 'yolov5':      net = Yolov5(size, 80).eval()
-        case 'yolov6':      net = Yolov6(size, 80).eval()
+        case 'yolov5':      net = Yolov5(variant, 80).eval()
+        case 'yolov6':      net = Yolov6(variant, 80).eval()
         case 'yolov7':      net = Yolov7(80).eval()
-        case 'yolov8':      net = Yolov8(size, 80).eval()
-        case 'yolov10':     net = Yolov10(size, 80).eval()
+        case 'yolov8':      net = Yolov8(variant, 80).eval()
+        case 'yolov10':     net = Yolov10(variant, 80).eval()
     
-    print("{}{} has {} parameters".format(type, size, count_parameters(net)))
+    print(f"{model}{variant} has {count_parameters(net)} parameters")
 
     has_obj = True
 
-    if type in ['yolov5', 'yolov8', 'yolov10']:
+    if model in ['yolov5', 'yolov8', 'yolov10']:
         load_from_ultralytics(net)
         has_obj = False
     
-    elif 'yolov3' in type or 'yolov4' in type :
-        filepath = '../weights/{}.weights'.format(type)
-        download_if_not_exist(type, filepath)
+    elif 'yolov3' in model or 'yolov4' in model :
+        filepath = f'../weights/{model}.weights'
+        download_if_not_exist(model, filepath)
         load_from_darknet(net, filepath)
     
-    elif type == 'yolov6':
-        load_from_yolov6_official(net, "../weights/yolov6{}.pt".format(size))
+    elif model == 'yolov6':
+        load_from_yolov6_official(net, f"../weights/yolov6{variant}.pt")
         has_obj = False
 
-    elif type == 'yolov7':
+    elif model == 'yolov7':
         load_from_yolov7_official(net, '../weights/yolov7.pt')
 
     img = torchvision.io.read_image('../images/dog.jpg')
@@ -172,30 +184,90 @@ def test(type: str, size: str = ''):
     boxes = preds[:,:4]
     cls   = preds[:,-80:].argmax(-1)
     canvas = torchvision.utils.draw_bounding_boxes(img, boxes, [COCO_NAMES[i] for i in cls])
-    torchvision.io.write_png(canvas, 'dog_{}{}_output.png'.format(type, size))
+    torchvision.io.write_png(canvas, f'dog_{model}{variant}_output.png')
 
-test('yolov5', 'n')
-test('yolov5', 's')
-test('yolov5', 'm')
-test('yolov5', 'l')
-test('yolov5', 'x')
-test('yolov8', 'n')
-test('yolov8', 's')
-test('yolov8', 'm')
-test('yolov8', 'l')
-test('yolov8', 'x')
+
+def export(model: str, variant: str = ''):
+    with torch.inference_mode():
+        match model:
+            case 'yolov3' :     net = Yolov3(80, False).eval()
+            case 'yolov3-spp':  net = Yolov3(80, True).eval()
+            case 'yolov3-tiny': net = Yolov3Tiny(80).eval()
+            case 'yolov4':      net = Yolov4(80).eval()
+            case 'yolov4-tiny': net = Yolov4Tiny(80).eval()
+            case 'yolov5':      net = Yolov5(variant, 80).eval()
+            case 'yolov6':      net = Yolov6(variant, 80).eval()
+            case 'yolov7':      net = Yolov7(80).eval()
+            case 'yolov8':      net = Yolov8(variant, 80).eval()
+            case 'yolov10':     net = Yolov10(variant, 80).eval()
+
+        print(bcolors.OKGREEN, f"Exporting {type(net).__name__} ...", bcolors.ENDC)
+        x = torch.randn(4, 3, 640, 640)
+        _ = net(x) # warmup all the einops kernels
+        torch.onnx.export(net, (x,), '/tmp/model.onnx', 
+                          verbose=False,
+                          input_names=['img'],
+                          output_names=['preds'],
+                          dynamic_axes={'img'   : {0: 'B', 2: 'H', 3: 'W'},
+                                        'preds' : {0: 'B', 1: 'N'}})
+        print(bcolors.OKGREEN, f"Exporting {type(net).__name__} ... Done", bcolors.ENDC)
+
+        print(bcolors.OKGREEN, "Checking with onnxruntime...", bcolors.ENDC)
+        netOrt  = ort.InferenceSession('/tmp/model.onnx', providers=['CPUExecutionProvider'])
+        x       = torch.randn(1, 3, 576, 768)
+        preds1  = net(x) 
+        preds2, = netOrt.run(None, {'img': x.numpy()})
+        torch.testing.assert_close(preds1, torch.from_numpy(preds2)) #, atol=5e-5, rtol=1e-4)
+        print(bcolors.OKGREEN, "Checking with onnxruntime... Done", bcolors.ENDC)
+        
 test('yolov3')
 test('yolov3-spp')
 test('yolov3-tiny')
 test('yolov4')
 test('yolov4-tiny')
+test('yolov5', 'n')
+test('yolov5', 's')
+test('yolov5', 'm')
+test('yolov5', 'l')
+test('yolov5', 'x')
 test('yolov6', 'n')
 test('yolov6', 's')
 test('yolov6', 'm')
 test('yolov7')
+test('yolov8', 'n')
+test('yolov8', 's')
+test('yolov8', 'm')
+test('yolov8', 'l')
+test('yolov8', 'x')
 test('yolov10', 'n')
 test('yolov10', 's')
 test('yolov10', 'm')
 test('yolov10', 'b')
 test('yolov10', 'l')
 test('yolov10', 'x')
+
+export('yolov3')
+export('yolov3-spp')
+export('yolov3-tiny')
+export('yolov4')
+export('yolov4-tiny')
+export('yolov5', 'n')
+export('yolov5', 's')
+export('yolov5', 'm')
+export('yolov5', 'l')
+export('yolov5', 'x')
+export('yolov6', 'n')
+export('yolov6', 's')
+export('yolov6', 'm')
+export('yolov7')
+export('yolov8', 'n')
+export('yolov8', 's')
+export('yolov8', 'm')
+export('yolov8', 'l')
+export('yolov8', 'x')
+export('yolov10', 'n')
+export('yolov10', 's')
+export('yolov10', 'm')
+export('yolov10', 'b')
+export('yolov10', 'l')
+export('yolov10', 'x')

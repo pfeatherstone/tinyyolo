@@ -40,22 +40,26 @@ If you like tiny code, Pytorch and Yolo, then you'll like TinyYolo.
 ## Example ##
 
 ```
-net = Yolov3(80, spp=True).eval()
-# net = Yolov4(80).eval()
-# net = Yolov5('n', 80).eval()
-# net = Yolov6('n', 80).eval()
-# net = Yolov7(80).eval()
-# net = Yolov8('n', 80).eval()
-# net = Yolov10('n', 80).eval()
+nc  = ... # number of classes, e.g. 80 for COCO
+net = Yolov3(nc, spp=True).eval()
+# net = Yolov4(nc).eval()
+# net = Yolov5('n', nc).eval()
+# net = Yolov6('n', nc).eval()
+# net = Yolov7(nc).eval()
+# net = Yolov8('n', nc).eval()
+# net = Yolov10('n', nc).eval()
 
 # Inference only
-x = torch.randn(4, 3, 640, 640) # image-like
-preds = net(x) # preds.shape == [4, N, 85] or 84 if there's no objectness feature e.g V5, V6, V8, V10
+B = ... # Batch size
+H = ... # Height
+W = ... # Width
+x = torch.randn(B, 3, H, W) # image-like
+preds = net(x) # preds.shape == [B, N, nc+5] or nc+4 if there's no objectness feature e.g V5, V6, V8, V10
 
 # Train
 D = ... # max number of target detections per batch
-C = 5   # target features [x1,y1,x2,y2,cls] where cls == -1 is used for padding
-targets = torch.randn(4, D, C)
+C = 5   # target features [x1,y1,x2,y2,cls] where x1,x2 ∈ [0,W], y1,y2 ∈ [0,H], cls ∈ [-1,nc) and -1 is used for padding
+targets = torch.randn(B, D, C)
 preds, loss_dict = net(x, targets)
 
 ```
@@ -66,12 +70,6 @@ preds, loss_dict = net(x, targets)
 
 ```
 net = Yolov3(80, spp=True).eval()
-# net = Yolov4(80).eval()
-# net = Yolov5('n', 80).eval()
-# net = Yolov6('n', 80).eval()
-# net = Yolov7(80).eval()
-# net = Yolov8('n', 80).eval()
-# net = Yolov10('n', 80).eval()
 
 x = torch.randn(4, 3, 640, 640)
 _ = net(x) # compile all the einops kernels. Required before ONNX export

@@ -375,21 +375,16 @@ class BackboneV4(nn.Module):
         conv     = partial(Conv, act=act)
         c4       = partial(C4, act=act)
         self.b0  = conv(3, 32, 3)
-        self.b1  = conv(32, 64, 3, s=2)
-        self.b2  = c4( 64,  64, f=1.0, e=0.5, n=1)
-        self.b3  = conv(64, 128, 3, s=2)
-        self.b4  = c4(128, 128, f=0.5, e=1.0, n=2)
-        self.b5  = conv(128, 256, 3, s=2)
-        self.b6  = c4(256, 256, f=0.5, e=1.0, n=8)
-        self.b7  = conv(256, 512, 3, s=2)
-        self.b8  = c4(512, 512, f=0.5, e=1.0, n=8)
-        self.b9  = conv(512, 1024, 3, s=2)
-        self.b10 = c4(1024, 1024, f=0.5, e=1.0, n=4)
+        self.b1  = nn.Sequential(conv( 32,   64, 3, s=2), c4( 64,  64, f=1.0, e=0.5, n=1))
+        self.b2  = nn.Sequential(conv( 64,  128, 3, s=2), c4(128, 128, f=0.5, e=1.0, n=2))
+        self.b3  = nn.Sequential(conv(128,  256, 3, s=2), c4(256, 256, f=0.5, e=1.0, n=8))
+        self.b4  = nn.Sequential(conv(256,  512, 3, s=2), c4(512, 512, f=0.5, e=1.0, n=8))
+        self.b5  = nn.Sequential(conv(512, 1024, 3, s=2), c4(1024,1024,f=0.5, e=1.0, n=4))
 
     def forward(self, x):
-        p8  = self.b6(self.b5(self.b4(self.b3(self.b2(self.b1(self.b0(x)))))))
-        p16 = self.b8(self.b7(p8))
-        p32 = self.b10(self.b9(p16))
+        p8  = self.b3(self.b2(self.b1(self.b0(x))))
+        p16 = self.b4(p8)
+        p32 = self.b5(p16)
         return p8, p16, p32
 
 class BackboneV4TinyBlock(nn.Module):
@@ -411,16 +406,13 @@ class BackboneV4Tiny(nn.Module):
         super().__init__()
         conv = partial(Conv, act=actV3)
         self.b1 = nn.Sequential(conv(3, 32, 3, 2), conv(32, 64, 3, 2), conv(64, 64, 3, 1))
-        self.c1 = BackboneV4TinyBlock(32)
-        self.b2 = nn.Sequential(MaxPool(2), conv(128, 128, 3, 1))
-        self.c2 = BackboneV4TinyBlock(64)
-        self.b3 = nn.Sequential(MaxPool(2), conv(256, 256, 3, 1))
-        self.c3 = BackboneV4TinyBlock(128)
-        self.b4 = nn.Sequential(MaxPool(2), conv(512, 512, 3, 1))
+        self.b2 = nn.Sequential(BackboneV4TinyBlock(32),  MaxPool(2), conv(128, 128, 3, 1))
+        self.b3 = nn.Sequential(BackboneV4TinyBlock(64),  MaxPool(2), conv(256, 256, 3, 1))
+        self.b4 = nn.Sequential(BackboneV4TinyBlock(128), MaxPool(2), conv(512, 512, 3, 1))
     def forward(self, x):
-        p8  = self.b2(self.c1(self.b1(x)))
-        p16 = self.b3(self.c2(p8))
-        p32 = self.b4(self.c3(p16))
+        p8  = self.b2(self.b1(x))
+        p16 = self.b3(p8)
+        p32 = self.b4(p16)
         return p16, p32
 
 class ElanBlock(nn.Module):

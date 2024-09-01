@@ -193,9 +193,7 @@ def load_from_yolov7_official(net: Yolov7, weights_pt: str):
             layer.weight.data.copy_(torch.cat([weight[1], weight[0]], 1))
 
 
-def test(model: str, variant: str = ''):
-    os.makedirs('../weights', exist_ok=True)
-
+def get_model(model: str, variant: str = ''):
     match model:
         case 'yolov3' :     net = Yolov3(80, False).eval()
         case 'yolov3-spp':  net = Yolov3(80, True).eval()
@@ -210,17 +208,18 @@ def test(model: str, variant: str = ''):
     
     print(f"{model}{variant} has {count_parameters(net)} parameters")
 
+    os.makedirs('../weights', exist_ok=True)
     has_obj = True
-
-    if model in ['yolov5', 'yolov8', 'yolov10']:
-        load_from_ultralytics(net)
-        has_obj = False
     
-    elif 'yolov3' in model or 'yolov4' in model :
+    if 'yolov3' in model or 'yolov4' in model :
         filepath = f'../weights/{model}.weights'
         download_if_not_exist(model, filepath)
         load_from_darknet(net, filepath)
     
+    if model in ['yolov5', 'yolov8', 'yolov10']:
+        load_from_ultralytics(net)
+        has_obj = False
+
     elif model == 'yolov6':
         load_from_yolov6_official(net, f"../weights/yolov6{variant}.pt")
         has_obj = False
@@ -228,46 +227,41 @@ def test(model: str, variant: str = ''):
     elif model == 'yolov7':
         load_from_yolov7_official(net, '../weights/yolov7.pt')
 
-    img = torchvision.io.read_image('../images/dog.jpg')
+    return net, has_obj
+
+
+@torch.inference_mode
+def test(model: str, variant: str = ''):
+    net, has_obj = get_model(model, variant)
+
+    img      = torchvision.io.read_image('../images/dog.jpg')
     _, preds = nms(net(img[None] / 255.0), 0.3, 0.5, has_objectness=has_obj)
-    boxes = preds[:,:4]
-    cls   = preds[:,-80:].argmax(-1)
-    canvas = torchvision.utils.draw_bounding_boxes(img, boxes, [COCO_NAMES[i] for i in cls])
+    boxes    = preds[:,:4]
+    cls      = preds[:,-80:].argmax(-1)
+    canvas   = torchvision.utils.draw_bounding_boxes(img, boxes, [COCO_NAMES[i] for i in cls])
     torchvision.io.write_png(canvas, f'dog_{model}{variant}_output.png')
 
 
 def export(model: str, variant: str = ''):
-    with torch.inference_mode():
-        match model:
-            case 'yolov3' :     net = Yolov3(80, False).eval()
-            case 'yolov3-spp':  net = Yolov3(80, True).eval()
-            case 'yolov3-tiny': net = Yolov3Tiny(80).eval()
-            case 'yolov4':      net = Yolov4(80).eval()
-            case 'yolov4-tiny': net = Yolov4Tiny(80).eval()
-            case 'yolov5':      net = Yolov5(variant, 80).eval()
-            case 'yolov6':      net = Yolov6(variant, 80).eval()
-            case 'yolov7':      net = Yolov7(80).eval()
-            case 'yolov8':      net = Yolov8(variant, 80).eval()
-            case 'yolov10':     net = Yolov10(variant, 80).eval()
+    net, has_obj = get_model(model, variant)
+    x = torch.randn(4, 3, 640, 640)
+    _ = net(x) # warmup all the einops kernels
 
-        print(bcolors.OKGREEN, f"Exporting {type(net).__name__} ...", bcolors.ENDC)
-        x = torch.randn(4, 3, 640, 640)
-        _ = net(x) # warmup all the einops kernels
-        torch.onnx.export(net, (x,), '/tmp/model.onnx', 
-                          verbose=False,
-                          input_names=['img'],
-                          output_names=['preds'],
-                          dynamic_axes={'img'   : {0: 'B', 2: 'H', 3: 'W'},
-                                        'preds' : {0: 'B', 1: 'N'}})
-        print(bcolors.OKGREEN, f"Exporting {type(net).__name__} ... Done", bcolors.ENDC)
+    print(bcolors.OKGREEN, f"Exporting {type(net).__name__} ...", bcolors.ENDC)
+    torch.onnx.export(net, (x,), '/tmp/model.onnx',
+                      input_names=['img'],
+                      output_names=['preds'],
+                      dynamic_axes={'img'   : {0: 'B', 2: 'H', 3: 'W'},
+                                    'preds' : {0: 'B', 1: 'N'}})
+    print(bcolors.OKGREEN, f"Exporting {type(net).__name__} ... Done", bcolors.ENDC)
 
-        print(bcolors.OKGREEN, "Checking with onnxruntime...", bcolors.ENDC)
-        netOrt  = ort.InferenceSession('/tmp/model.onnx', providers=['CPUExecutionProvider'])
-        x       = torch.randn(1, 3, 576, 768)
-        preds1  = net(x) 
-        preds2, = netOrt.run(None, {'img': x.numpy()})
-        torch.testing.assert_close(preds1, torch.from_numpy(preds2)) #, atol=5e-5, rtol=1e-4)
-        print(bcolors.OKGREEN, "Checking with onnxruntime... Done", bcolors.ENDC)
+    print(bcolors.OKGREEN, "Checking with onnxruntime...", bcolors.ENDC)
+    netOrt  = ort.InferenceSession('/tmp/model.onnx', providers=['CPUExecutionProvider'])
+    x       = torch.randn(1, 3, 576, 768)
+    preds1  = net(x) 
+    preds2, = netOrt.run(None, {'img': x.numpy()})
+    torch.testing.assert_close(preds1, torch.from_numpy(preds2)) #, atol=5e-5, rtol=1e-4)
+    print(bcolors.OKGREEN, "Checking with onnxruntime... Done", bcolors.ENDC)
         
 test('yolov3')
 test('yolov3-spp')

@@ -68,6 +68,8 @@ preds, loss_dict = net(x, targets)
 
 ### ONNX ###
 
+Export it...
+
 ```
 net = Yolov3(80, spp=True).eval()
 
@@ -77,6 +79,45 @@ torch.onnx.export(net, (x,), '/tmp/model.onnx',
                   input_names=['img'], output_names=['preds'],
                   dynamic_axes={'img'   : {0: 'B', 2: 'H', 3: 'W'},
                                 'preds' : {0: 'B', 1: 'N'}})
+```
+
+Run it...
+
+Install dependencies:
+
+```
+pip install numpy onnxruntime
+```
+
+```
+import onnxruntime as ort
+import numpy as np
+
+net    = ort.InferenceSession('/tmp/model.onnx', providers=['CPUExecutionProvider'])
+x      = np.random.randn((1, 3, 576, 768))
+preds, = net.run(None, {'img': x})
+```
+
+Compile it...
+
+Download onnxmlir and use the [onnx-mlir.py](https://github.com/onnx/onnx-mlir/blob/main/docs/Docker.md#easy-script-to-compile-a-model) script.
+
+```
+python3 onnx-mlir.py --EmitObj -O3 /tmp/model.onnx -o model 
+```
+
+### TFLite ###
+
+Convert it...
+
+Install dependencies:
+
+```
+pip install onnx2tf tensorflow tf_keras onnx_graphsurgeon sng4onnx onnxsim
+```
+
+```
+onnx2tf -i /tmp/model.onnx -ois "img:1,3,640,640" -o /tmp/model
 ```
 
 ## Notes ##

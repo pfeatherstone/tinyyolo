@@ -101,6 +101,9 @@ def exists(val):
 def default(val, d):
     return val if exists(val) else d
 
+def Repeat(module, N):
+    return nn.Sequential(*[deepcopy(module) for _ in range(N)])
+
 class Residual(nn.Module):
     def __init__(self, f):
         super().__init__()
@@ -108,11 +111,9 @@ class Residual(nn.Module):
     def forward(self, x):
         return x + self.f(x)
 
-def Repeat(module, N):
-    return nn.Sequential(*[deepcopy(module) for _ in range(N)])
-
-def Conv(c1, c2, k=1, s=1, p=None, g=None, act=nn.SiLU(True)):
-    return nn.Sequential(nn.Conv2d(c1, c2, k, s, default(p,k//2), groups=default(g,1), bias=False),
+class Conv(nn.Sequential):
+    def __init__(self, c1, c2, k=1, s=1, p=None, g=None, act=nn.SiLU(True)):
+        super().__init__(nn.Conv2d(c1, c2, k, s, default(p,k//2), groups=default(g,1), bias=False),
                          nn.BatchNorm2d(c2),
                          act)
 
@@ -180,30 +181,12 @@ def BottleRepBlock(c1, c2, n=1):
     n = n // 2
     block = partial(BottleRep, weight=True)
     return nn.Sequential(block(c1, c2), *[block(c2, c2) for _ in range(n - 1)])
-
-class CspBlock(nn.Module):
-    def __init__(self, c1, c2, f=1, e=1, act=actV3, n=1):
-        super().__init__()
-        conv    = partial(Conv, act=act)
-        c_      = int(c2 * f)  # hidden channels
-        self.d  = conv(c1, c_, 3, s=2)
-        self.c1 = conv(c_, c2, 1)
-        self.c2 = conv(c_, c2, 1)
-        self.m  = Repeat(Bottleneck(c2, e=e, k=(1,3), act=act), n)
-        self.c3 = conv(c2, c2, 1)
-        self.c4 = conv(2*c2, c_, 1)
-    def forward(self, x):
-        x = self.d(x)
-        a = self.c1(x)
-        b = self.c3(self.m(self.c2(x)))
-        x = self.c4(torch.cat([b, a], 1))
-        return x
         
 class C2f(nn.Module):
     def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):  # ch_in, ch_out, number, shortcut, groups, expansion
         super().__init__()
         self.c_  = int(c2 * e)  # hidden channels
-        self.cv1 = Conv(c1, 2 * self.c_, 1, 1)
+        self.cv1 = Conv(c1, 2 * self.c_, 1)
         self.cv2 = Conv((2 + n) * self.c_, c2, 1)  # optional act=FReLU(c2)
         self.m   = nn.ModuleList(Bottleneck(self.c_, k=(3, 3), e=1.0, g=g, shortcut=shortcut) for _ in range(n))
 
@@ -216,14 +199,33 @@ class C3(nn.Module):
     def __init__(self, c1, c2, n=1, shortcut=True, e=0.5):
         super().__init__()
         c_       = int(c2 * e)  # hidden channels
-        self.cv1 = Conv(c1, c_, 1, 1)
-        self.cv2 = Conv(c1, c_, 1, 1)
-        self.cv3 = Conv(2 * c_, c2, 1)  # optional act=FReLU(c2)f
+        self.cv1 = Conv(c1, c_, 1)
+        self.cv2 = Conv(c1, c_, 1)
+        self.cv3 = Conv(2*c_, c2, 1)  # optional act=FReLU(c2)f
         self.m   = Repeat(Bottleneck(c_, shortcut=shortcut, k=(1, 3), e=1.0), n)
 
     def forward(self, x):
-        return self.cv3(torch.cat((self.m(self.cv1(x)), self.cv2(x)), 1))
+        a = self.cv1(x)
+        b = self.m(self.cv2(x))
+        return self.cv3(torch.cat((b, a), 1))
 
+class C4(nn.Module):
+    def __init__(self, c1, c2, f=1, e=1, act=actV3, n=1):
+        super().__init__()
+        conv     = partial(Conv, act=act)
+        c_       = int(c2 * f)  # hidden channels
+        self.cv1 = conv(c1, c_, 1)
+        self.cv2 = conv(c1, c_, 1)
+        self.cv3 = conv(c_, c_, 1)
+        self.cv4 = conv(2*c_, c2, 1)
+        self.m   = Repeat(Bottleneck(c_, k=(1,3), e=e, act=act), n)
+        
+    def forward(self, x):
+        a = self.cv1(x)
+        b = self.cv3(self.m(self.cv2(x)))
+        x = self.cv4(torch.cat([b, a], 1))
+        return x
+    
 class BepC3(nn.Module):
     def __init__(self, c1, c2, n=1, e=0.5):
         super().__init__()
@@ -344,6 +346,7 @@ class Darknet53(nn.Module):
         self.b3   = nn.Sequential(conv(128,  256, 3, 2), Repeat(res(256), 8))
         self.b4   = nn.Sequential(conv(256,  512, 3, 2), Repeat(res(512), 8))
         self.b5   = nn.Sequential(conv(512, 1024, 3, 2), Repeat(res(1024),4))
+
     def forward(self, x):
         p8  = self.b3(self.b2(self.b1(self.stem(x))))
         p16 = self.b4(p8)
@@ -360,6 +363,7 @@ class BackboneV3Tiny(nn.Module):
                                 conv( 64, 128, 3), MaxPool(2),
                                 conv(128, 256, 3))
         self.b2 = nn.Sequential(MaxPool(2), conv(256, 512, 3), MaxPool(1), conv(512, 1024, 3))
+
     def forward(self, x):
         x16 = self.b1(x)
         x32 = self.b2(x16)
@@ -368,18 +372,24 @@ class BackboneV3Tiny(nn.Module):
 class BackboneV4(nn.Module):
     def __init__(self, act):
         super().__init__()
-        conv = partial(Conv, act=act)
-        csp  = partial(CspBlock, act=act)
-        self.stem = conv(3, 32, 3)
-        self.b1   = csp( 32,  64, f=1, e=0.5, n=1)
-        self.b2   = csp( 64,  64, f=2, e=1,   n=2)
-        self.b3   = csp(128, 128, f=2, e=1,   n=8)
-        self.b4   = csp(256, 256, f=2, e=1,   n=8)
-        self.b5   = csp(512, 512, f=2, e=1,   n=4)
+        conv     = partial(Conv, act=act)
+        c4       = partial(C4, act=act)
+        self.b0  = conv(3, 32, 3)
+        self.b1  = conv(32, 64, 3, s=2)
+        self.b2  = c4( 64,  64, f=1.0, e=0.5, n=1)
+        self.b3  = conv(64, 128, 3, s=2)
+        self.b4  = c4(128, 128, f=0.5, e=1.0, n=2)
+        self.b5  = conv(128, 256, 3, s=2)
+        self.b6  = c4(256, 256, f=0.5, e=1.0, n=8)
+        self.b7  = conv(256, 512, 3, s=2)
+        self.b8  = c4(512, 512, f=0.5, e=1.0, n=8)
+        self.b9  = conv(512, 1024, 3, s=2)
+        self.b10 = c4(1024, 1024, f=0.5, e=1.0, n=4)
+
     def forward(self, x):
-        p8  = self.b3(self.b2(self.b1(self.stem(x))))
-        p16 = self.b4(p8)
-        p32 = self.b5(p16)
+        p8  = self.b6(self.b5(self.b4(self.b3(self.b2(self.b1(self.b0(x)))))))
+        p16 = self.b8(self.b7(p8))
+        p32 = self.b10(self.b9(p16))
         return p8, p16, p32
 
 class BackboneV4TinyBlock(nn.Module):
@@ -594,11 +604,11 @@ class HeadV3(nn.Module):
 class HeadV3Tiny(nn.Module):
     def __init__(self, c):
         super().__init__()
-        self.b1 = Conv(c, 256, 1, act=actV3)
-        self.c2 = Conv(256,  128, 1, act=actV3)
+        self.b0 = Conv(c, 256, 1, act=actV3)
+        self.b1 = Conv(256,  128, 1, act=actV3)
     def forward(self, x16, x32):
-        p32 = self.b1(x32)
-        p16 = torch.cat([F.interpolate(self.c2(p32), scale_factor=2), x16], 1)
+        p32 = self.b0(x32)
+        p16 = torch.cat([F.interpolate(self.b1(p32), scale_factor=2), x16], 1)
         return p16, p32
 
 class HeadV4(nn.Module):
@@ -995,11 +1005,6 @@ class Yolov3(nn.Module):
         self.net  = Darknet53()
         self.fpn  = HeadV3(spp)
         self.head = DetectV3(nclasses, [8,16,32], ANCHORS_V3, [1,1,1], ch=[(128, 256), (256, 512), (512, 1024)])
-
-    def layers(self):
-        return [self.net,    self.fpn.b1, self.head.cv[2], 
-                self.fpn.c1, self.fpn.b2, self.head.cv[1], 
-                self.fpn.c2, self.fpn.b3, self.head.cv[0]]
     
     def forward(self, x, targets=None):
         x = self.net(x)
@@ -1013,9 +1018,6 @@ class Yolov3Tiny(nn.Module):
         self.fpn  = HeadV3Tiny(1024)
         self.head = DetectV3(nclasses, [16,32], ANCHORS_V3_TINY, [1,1], ch=[(384, 256), (256, 512)])
 
-    def layers(self):
-        return [self.net, self.fpn.b1, self.head.cv[1], self.fpn.c2, self.head.cv[0]]
-    
     def forward(self, x, targets=None):
         x = self.net(x)
         x = self.fpn(*x)
@@ -1028,12 +1030,6 @@ class Yolov4(nn.Module):
         self.fpn  = HeadV4(actV3)
         self.head = DetectV3(nclasses, [8,16,32], ANCHORS_V4, [1.2, 1.1, 1.05], ch=[(128, 256), (256, 512), (512, 1024)])
 
-    def layers(self):
-        return [self.net, self.fpn.b1, self.fpn.c1, self.fpn.b2, 
-                self.fpn.c2, self.fpn.b3, self.head.cv[0],
-                self.fpn.c3, self.fpn.b4, self.head.cv[1],
-                self.fpn.c4, self.fpn.b5, self.head.cv[2]]
-    
     def forward(self, x, targets=None):
         x = self.net(x)
         x = self.fpn(*x)
@@ -1045,9 +1041,6 @@ class Yolov4Tiny(nn.Module):
         self.net  = BackboneV4Tiny()
         self.fpn  = HeadV3Tiny(512)
         self.head = DetectV3(nclasses, [16,32], ANCHORS_V3_TINY, [1.05,1.5], ch=[(384, 256), (256, 512)])
-
-    def layers(self):
-        return [self.net, self.fpn.b1, self.head.cv[1], self.fpn.c2, self.head.cv[0]]
     
     def forward(self, x, targets=None):
         x = self.net(x)

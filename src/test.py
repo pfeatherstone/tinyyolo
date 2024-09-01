@@ -28,27 +28,73 @@ def download_if_not_exist(model_type: str, filepath: str):
         torch.hub.download_url_to_file(weight_paths[model_type], filepath)
 
 
+def swap_convs(cv1, cv2):
+    state1 = deepcopy(cv1.state_dict())
+    state2 = deepcopy(cv2.state_dict())
+    cv1.load_state_dict(state2)
+    cv2.load_state_dict(state1)
+
+
 def load_from_darknet(net: Union[Yolov3, Yolov3Tiny, Yolov4, Yolov4Tiny], weights_path: str):
+    
+    def params(net):
+        # Handle special modules
+        if isinstance(net, Yolov3):
+            for module in [net.net,    net.fpn.b1, net.head.cv[2], 
+                           net.fpn.c1, net.fpn.b2, net.head.cv[1], 
+                           net.fpn.c2, net.fpn.b3, net.head.cv[0]]:
+                yield from params(module)
+        
+        elif isinstance(net, Yolov3Tiny):
+            for module in [net.net, net.fpn.b0, net.head.cv[1], 
+                                    net.fpn.b1, net.head.cv[0]]:
+                yield from params(module)
+            
+        elif isinstance(net, Yolov4):
+            for module in [net.net, net.fpn.b1, net.fpn.c1, net.fpn.b2, 
+                                    net.fpn.c2, net.fpn.b3, net.head.cv[0],
+                                    net.fpn.c3, net.fpn.b4, net.head.cv[1],
+                                    net.fpn.c4, net.fpn.b5, net.head.cv[2]]:
+                yield from params(module)
+        
+        elif isinstance(net, Yolov4Tiny):
+            for module in [net.net, net.fpn.b0, net.head.cv[1], net.fpn.b1, net.head.cv[0]]:
+                yield from params(module)
+
+        elif isinstance(net, BackboneV4):
+            for module in net.children():
+                yield from params(module)
+        
+        elif isinstance(net, C4):
+            for module in [net.cv1, net.cv2, net.m, net.cv3, net.cv4]:
+                yield from params(module)
+
+        elif isinstance(net, Conv):
+            yield from [net[1].bias, net[1].weight, net[1].running_mean, net[1].running_var, net[0].weight]
+        
+        elif isinstance(net, nn.Conv2d):
+            if exists(net.bias):
+                yield net.bias
+            yield net.weight
+
+        else:
+            # Loop through children recursively
+            has_children = False
+            for m in net.children():
+                has_children = True
+                yield from params(m)
+            # No children, yield parameters
+            if not has_children:
+                yield from net.state_dict().values() 
+    
     with open(weights_path, "rb") as f:
         major, minor, _ = np.fromfile(f, dtype=np.int32, count=3)
         steps = np.fromfile(f, count=1, dtype=np.int64 if (major * 10 + minor) >= 2 and major < 1000 and minor < 1000 else np.int32)
         offset = f.tell()
 
-        # Get all weights
-        weights = []
-        for block in net.layers():
-            for m in block.modules():
-                if isinstance(m, nn.Conv2d):
-                    weights.append([m.bias, m.weight] if exists(m.bias) else [m.weight])
-                if isinstance(m, nn.BatchNorm2d):
-                    conv_weights = weights.pop()
-                    weights.append([m.bias, m.weight, m.running_mean, m.running_var])
-                    weights.append(conv_weights)
-
         # Load all weights
-        for w in weights:
-            for wi in w:
-                wi.data.copy_(torch.from_numpy(np.fromfile(f, dtype=np.float32, count=wi.numel())).view_as(wi))
+        for w in params(net):
+            w.data.copy_(torch.from_numpy(np.fromfile(f, dtype=np.float32, count=w.numel())).view_as(w))
 
         assert (nP1 := count_parameters(net) * 4) == (nP2 := f.tell() - offset), f"{nP1} != {nP2}"
 
@@ -63,6 +109,9 @@ def load_from_ultralytics(net: Union[Yolov5, Yolov8, Yolov10]):
         copy_params(net.fpn, net2.model[10:24])
         copy_params(net.head.cv2, net2.model[24].cv2)
         copy_params(net.head.cv3, net2.model[24].cv3)
+        for module in net.modules():
+            if isinstance(module, C3):
+                swap_convs(module.cv1, module.cv2)
 
     elif isinstance(net, Yolov8):
         net2 = YOLO('yolov8{}.pt'.format(net.v)).model.eval()

@@ -132,11 +132,10 @@ onnx2tf -i /tmp/model.onnx -ois "img:1,3,640,640" -o /tmp/model
 
 * From what I can tell the main innovation in yolov6 is the distillation loss in bounding box regression: there are two branches for bounding box, one with DFL and one without. AFAIK, only the DFL one gets used in forward pass. During training, both get CIOU loss-ed.
 
+* onnx-mlir is very slow and runs on 1 thread only. So onnxruntime is better for inferrence.
+
 ## TODO ##
 
 - [ ] Train everything (probably going to need some cloud compute (help))
 - [ ] Train with mixed precision
-- [ ] API docs + examples (in README)
-- [ ] Add examples for ONNX export, TFLITE export.
-- [ ] Explore how to compile models. Try TVM, onnx-mlir, TinyGrad (export to ONNX, load into tinygrad, then export LLVM or C code then compile)
 - [ ] Maybe add Yolov9

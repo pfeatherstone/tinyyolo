@@ -31,8 +31,8 @@ If you like tiny code, Pytorch and Yolo, then you'll like TinyYolo.
 - [x] Yolov7
 - [x] Yolov8(n,s,m,l,x)
 - [x] Yolov10(n,s,m,b,l,x)
-- [] Yolov11(n,s,m,l,x)
-- [] Yolov12(n,s,m,l,x)
+- [ ] Yolov11(n,s,m,l,x)
+- [ ] Yolov12(n,s,m,l,x)
 
 ## Assigners ##
 - [x] [FCOS](https://arxiv.org/pdf/1904.01355)

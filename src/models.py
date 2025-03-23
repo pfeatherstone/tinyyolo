@@ -750,6 +750,25 @@ class HeadV10(nn.Module):
         x22 = self.n6(torch.cat([self.n5(x19),x10], 1)) # 22 (P5/32-large)
         return [x16, x19, x22]
 
+class HeadV11(nn.Module):
+    def __init__(self, w, r, d, variant):
+        super().__init__()
+        c3k = variant in "mlx"
+        self.up = nn.Upsample(scale_factor=2)
+        self.n1 = C3k2(c1=int(512*w*(1+r)), c2=int(512*w), n=round(2*d), c3k=c3k)
+        self.n2 = C3k2(c1=int(512*w*2),     c2=int(256*w), n=round(2*d), c3k=c3k)
+        self.n3 = Conv(c1=int(256*w),       c2=int(256*w), k=3, s=2)
+        self.n4 = C3k2(c1=int(768*w),       c2=int(512*w), n=round(2*d), c3k=c3k)
+        self.n5 = Conv(c1=int(512* w),      c2=int(512*w), k=3, s=2)
+        self.n6 = C3k2(c1=int(512*w*(1+r)), c2=int(512*w*r), n=round(2*d), c3k=True)
+
+    def forward(self, x4, x6, x10):
+        x13 = self.n1(torch.cat([self.up(x10),x6], 1))  # 13
+        x16 = self.n2(torch.cat([self.up(x13),x4], 1))  # 16 (P3/8-small)
+        x19 = self.n4(torch.cat([self.n3(x16),x13], 1)) # 19 (P4/16-medium)
+        x22 = self.n6(torch.cat([self.n5(x19),x10], 1)) # 22 (P5/32-large)
+        return [x16, x19, x22]
+    
 class BiFusion(nn.Module):
     def __init__(self, c1, c2):
         super().__init__()
@@ -1135,6 +1154,20 @@ class Yolov10(nn.Module):
         x = self.fpn(*x)
         return self.head(x)
 
+class Yolov11(nn.Module):
+    def __init__(self, variant, num_classes):
+        super().__init__()
+        self.v    = variant
+        d, w, r   = get_variant_multiplesV11(variant)
+        self.net  = BackboneV11(w, r, d, variant)
+        self.fpn  = HeadV11(w, r, d, variant)
+        self.head = Detect(num_classes, ch=(int(256*w), int(512*w), int(512*w*r)))
+
+    def forward(self, x):
+        x = self.net(x)
+        x = self.fpn(*x)
+        return self.head(x)
+    
 class Yolov6(nn.Module):
     def __init__(self, variant, num_classes):
         super().__init__()

@@ -71,6 +71,14 @@ def get_variant_multiplesV10(variant: str):
         case 'l': return (1.00, 1.00, 1.0)
         case 'x': return (1.00, 1.25, 1.0)
 
+def get_variant_multiplesV11(variant: str):
+    match variant:
+        case 'n': return (0.50, 0.25, 2.0)
+        case 's': return (0.50, 0.50, 2.0)
+        case 'm': return (0.50, 1.00, 1.0)
+        case 'l': return (1.00, 1.00, 1.0)
+        case 'x': return (1.00, 1.50, 1.0)
+
 def batchnorms(n: nn.Module):
     for m in n.modules():
         if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d)):
@@ -112,8 +120,8 @@ class Residual(nn.Module):
         return x + self.f(x)
 
 class Conv(nn.Sequential):
-    def __init__(self, c1, c2, k=1, s=1, p=None, g=None, act=nn.SiLU(True)):
-        super().__init__(nn.Conv2d(c1, c2, k, s, default(p,k//2), groups=default(g,1), bias=False),
+    def __init__(self, c1, c2, k=1, s=1, p=None, g=1, act=nn.SiLU(True)):
+        super().__init__(nn.Conv2d(c1, c2, k, s, default(p,k//2), groups=g, bias=False),
                          nn.BatchNorm2d(c2),
                          act)
 
@@ -127,10 +135,10 @@ def Con5(c1, c2=None, spp=False, act=actV3):
                          conv(c2//2, c2, 3),
                          conv(c2, c2//2, 1)) 
 
-def Bottleneck(c1, c2=None, k=(3, 3), shortcut=True, g=1, e=0.5, act=nn.SiLU(True)):
+def Bottleneck(c1, c2=None, k=(3, 3), shortcut=True, e=0.5, act=nn.SiLU(True)):
     c2  = default(c2, c1)
     c_  = int(c2 * e)
-    net = nn.Sequential(Conv(c1, c_, k[0], act=act), Conv(c_, c2, k[1], g=g, act=act))
+    net = nn.Sequential(Conv(c1, c_, k[0], act=act), Conv(c_, c2, k[1], act=act))
     return Residual(net) if shortcut else net
 
 def SCDown(c1, c2, k, s):
@@ -183,12 +191,12 @@ def BottleRepBlock(c1, c2, n=1):
     return nn.Sequential(block(c1, c2), *[block(c2, c2) for _ in range(n - 1)])
         
 class C2f(nn.Module):
-    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):  # ch_in, ch_out, number, shortcut, groups, expansion
+    def __init__(self, c1, c2, n=1, shortcut=False, e=0.5):  # ch_in, ch_out, number, shortcut, groups, expansion
         super().__init__()
         self.c_  = int(c2 * e)  # hidden channels
         self.cv1 = Conv(c1, 2 * self.c_, 1)
         self.cv2 = Conv((2 + n) * self.c_, c2, 1)  # optional act=FReLU(c2)
-        self.m   = nn.ModuleList(Bottleneck(self.c_, k=(3, 3), e=1.0, g=g, shortcut=shortcut) for _ in range(n))
+        self.m   = nn.ModuleList(Bottleneck(self.c_, k=(3, 3), e=1.0, shortcut=shortcut) for _ in range(n))
 
     def forward(self, x):
         y = list(self.cv1(x).chunk(2, 1))
@@ -196,18 +204,24 @@ class C2f(nn.Module):
         return self.cv2(torch.cat(y, 1))
     
 class C3(nn.Module):
-    def __init__(self, c1, c2, n=1, shortcut=True, e=0.5):
+    def __init__(self, c1, c2, n=1, shortcut=True, k=(1,3), e=0.5):
         super().__init__()
         c_       = int(c2 * e)  # hidden channels
         self.cv1 = Conv(c1, c_, 1)
         self.cv2 = Conv(c1, c_, 1)
         self.cv3 = Conv(2*c_, c2, 1)  # optional act=FReLU(c2)f
-        self.m   = Repeat(Bottleneck(c_, shortcut=shortcut, k=(1, 3), e=1.0), n)
+        self.m   = Repeat(Bottleneck(c_, shortcut=shortcut, k=k, e=1.0), n)
 
     def forward(self, x):
         a = self.cv1(x)
         b = self.m(self.cv2(x))
         return self.cv3(torch.cat((b, a), 1))
+
+def C3k2(c1, c2, n=1, shortcut=True, e=0.5, c3k=False):
+    net = C2f(c1, c2, n, shortcut, e)
+    blk = C3(net.c_, net.c_, k=(3,3), shortcut=shortcut, n=2) if c3k else Bottleneck(net.c_, k=(3,3), shortcut=shortcut)
+    net.m = nn.ModuleList(deepcopy(blk) for _ in range(n))
+    return net
 
 class C4(nn.Module):
     def __init__(self, c1, c2, f=1, e=1, act=actV3, n=1):
@@ -247,8 +261,8 @@ def CIB(c1, c2, shortcut=True, e=0.5, lk=False):
                         Conv(c2, c2, 3, g=c2))
     return Residual(net) if shortcut else net
     
-def C2fCIB(c1, c2, n=1, shortcut=False, lk=False, g=1, e=0.5):
-    net   = C2f(c1, c2, n, shortcut, g, e)
+def C2fCIB(c1, c2, n=1, shortcut=False, lk=False, e=0.5):
+    net   = C2f(c1, c2, n, shortcut, e)
     net.m = nn.ModuleList(CIB(net.c_, net.c_, shortcut, e=1.0, lk=lk) for _ in range(n))
     return net
 
@@ -321,15 +335,17 @@ class Attention(nn.Module):
         x       = self.proj(x + self.pe(v))
         return x
 
+def PSABlock(c, num_heads=4, attn_ratio=4):
+    return nn.Sequential(Residual(Attention(c, attn_ratio=attn_ratio, num_heads=num_heads)),
+                         Residual(nn.Sequential(Conv(c, c*2, 1), Conv(c*2, c, 1, act=nn.Identity()))))    
+
 class PSA(nn.Module):
-    def __init__(self, c1, c2, e=0.5):
+    def __init__(self, c, e=0.5, n=1):
         super().__init__()
-        assert(c1 == c2)
-        c_       = int(c2 * e)  # hidden channels
-        self.cv1 = Conv(c1, 2 * c_, 1)
-        self.cv2 = Conv(2 * c_, c1, 1)
-        self.net = nn.Sequential(Residual(Attention(c_, attn_ratio=0.5, num_heads=c_ // 64)),
-                                 Residual(nn.Sequential(Conv(c_, c_*2, 1), Conv(c_*2, c_, 1, act=nn.Identity()))))
+        c_       = int(c * e)  # hidden channels
+        self.cv1 = Conv(c,    2*c_, 1)
+        self.cv2 = Conv(2*c_, c,    1)
+        self.net = Repeat(PSABlock(c_, num_heads=c_ // 64, attn_ratio=0.5), n)
         
     def forward(self, x):
         a, b = self.cv1(x).chunk(2, 1)
@@ -527,11 +543,33 @@ class BackboneV10(nn.Module):
             case 's': self.b8 = C2fCIB(c1=int(512*w*r), c2=int(512*w*r), n=round(3*d), shortcut=True, lk=True)
             case _  : self.b8 = C2fCIB(c1=int(512*w*r), c2=int(512*w*r), n=round(3*d), shortcut=True, lk=False)
         self.b9 = SPPF(int(512*w*r), int(512*w*r))
-        self.b10 = PSA(int(512*w*r), int(512*w*r))
+        self.b10 = PSA(int(512*w*r))
 
     def forward(self, x):
         x4  = self.b4(self.b3(self.b2(self.b1(self.b0(x))))) # 4  P3/8
         x6  = self.b6(self.b5(x4))                           # 6  P4/16
+        x10 = self.b10(self.b9(self.b8(self.b7(x6))))        # 10 P5/32
+        return x4, x6, x10
+
+class BackboneV11(nn.Module):
+    def __init__(self, w, r, d, variant):
+        super().__init__()
+        c3k = variant in "mlx"
+        self.b0 = Conv(c1=3, c2=int(64*w), k=3, s=2)
+        self.b1 = Conv(int(64*w), int(128*w), k=3, s=2)
+        self.b2 = C3k2(c1=int(128*w), c2=int(256*w), n=round(2*d), e=0.25, c3k=c3k)
+        self.b3 = Conv(int(256*w), int(256*w), k=3, s=2)
+        self.b4 = C3k2(c1=int(256*w), c2=int(512*w), n=round(2*d), e=0.25, c3k=c3k)
+        self.b5 = Conv(int(512*w), int(512*w), k=3, s=2)
+        self.b6 = C3k2(c1=int(512*w), c2=int(512*w), n=round(2*d), e=0.50, c3k=True)
+        self.b7 = Conv(int(512*w), int(512*w*r), k=3, s=2)
+        self.b8 = C3k2(c1=int(512*w*r), c2=int(512*w*r), n=round(2*d), e=0.50, c3k=True)
+        self.b9 = SPPF(int(512*w*r), int(512*w*r))
+        self.b10 = PSA(int(512*w*r), n=round(2*d))
+
+    def forward(self, x):
+        x4  = self.b4(self.b3(self.b2(self.b1(self.b0(x))))) # 4 P3/8
+        x6  = self.b6(self.b5(x4))                           # 6 P4/16
         x10 = self.b10(self.b9(self.b8(self.b7(x6))))        # 10 P5/32
         return x4, x6, x10
 

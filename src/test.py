@@ -1,4 +1,6 @@
 import  os
+from    typing import Union
+import  numpy as np
 import  torch
 import  torchvision
 import  onnx
@@ -101,37 +103,33 @@ def load_from_darknet(net: Union[Yolov3, Yolov3Tiny, Yolov4, Yolov4Tiny], weight
         assert (nP1 := count_parameters(net) * 4) == (nP2 := f.tell() - offset), f"{nP1} != {nP2}"
 
 
-def load_from_ultralytics(net: Union[Yolov5, Yolov8, Yolov10]):
+def load_from_ultralytics(net: Union[Yolov5, Yolov8, Yolov10, Yolov11]):
     from ultralytics import YOLO
 
     if isinstance(net, Yolov5):
-        net2 = YOLO('yolov5{}u.pt'.format(net.v)).model.eval()
-        assert (nP1 := count_parameters(net)) == (nP2 := count_parameters(net2)), f'wrong number of parameters net {nP1} vs ultralytics {nP2}'
-        copy_params(net.net, net2.model[0:10])
-        copy_params(net.fpn, net2.model[10:24])
-        copy_params(net.head.cv2, net2.model[24].cv2)
-        copy_params(net.head.cv3, net2.model[24].cv3)
-        for module in net.modules():
-            if isinstance(module, C3):
-                swap_convs(module.cv1, module.cv2)
-
+        net2  = YOLO('yolov5{}u.pt'.format(net.v)).model.eval()
+        l0,l1 = 10,24
     elif isinstance(net, Yolov8):
-        net2 = YOLO('yolov8{}.pt'.format(net.v)).model.eval()
-        assert (nP1 := count_parameters(net)) == (nP2 := count_parameters(net2)), 'wrong number of parameters net {} vs ultralytics {}'.format(nP1, nP2)
-        copy_params(net.net, net2.model[0:10])
-        copy_params(net.fpn, net2.model[10:22])
-        copy_params(net.head.cv2, net2.model[22].cv2)
-        copy_params(net.head.cv3, net2.model[22].cv3)
-    
+        net2  = YOLO('yolov8{}.pt'.format(net.v)).model.eval()
+        l0,l1 = 10,22
     elif isinstance(net, Yolov10):
-        net2 = YOLO('yolov10{}.pt'.format(net.v)).model.eval()
-        assert (nP1 := count_parameters(net)) == (nP2 := count_parameters(net2)), 'wrong number of parameters net {} vs ultralytics {}'.format(nP1, nP2)
-        copy_params(net.net, net2.model[0:11])
-        copy_params(net.fpn, net2.model[11:23])
-        copy_params(net.head.cv2, net2.model[23].cv2)
-        copy_params(net.head.cv3, net2.model[23].cv3)
-        copy_params(net.head.one2one_cv2, net2.model[23].one2one_cv2)
-        copy_params(net.head.one2one_cv3, net2.model[23].one2one_cv3)
+        net2  = YOLO('yolov10{}.pt'.format(net.v)).model.eval()
+        l0,l1 = 11,23
+    elif isinstance(net, Yolov11):
+        net2  = YOLO('yolo11{}.pt'.format(net.v)).model.eval()
+        l0,l1 = 11,23
+
+    assert (nP1 := count_parameters(net)) == (nP2 := count_parameters(net2)), f'wrong number of parameters net {nP1} vs ultralytics {nP2}'
+    copy_params(net.net, net2.model[0:l0])
+    copy_params(net.fpn, net2.model[l0:l1])
+    copy_params(net.head.cv2, net2.model[l1].cv2)
+    copy_params(net.head.cv3, net2.model[l1].cv3)
+    if hasattr(net.head, 'one2one_cv2'):
+        copy_params(net.head.one2one_cv2, net2.model[l1].one2one_cv2)
+        copy_params(net.head.one2one_cv3, net2.model[l1].one2one_cv3)
+    for module in net.modules():
+        if isinstance(module, C3):
+            swap_convs(module.cv1, module.cv2)
 
 
 def load_from_yolov6_official(net: Yolov6, weights_pt: str):
@@ -207,6 +205,7 @@ def get_model(model: str, variant: str = ''):
         case 'yolov7':      net = Yolov7(80).eval()
         case 'yolov8':      net = Yolov8(variant, 80).eval()
         case 'yolov10':     net = Yolov10(variant, 80).eval()
+        case 'yolov11':     net = Yolov11(variant, 80).eval()
     
     print(f"{model}{variant} has {count_parameters(net)} parameters")
 
@@ -218,7 +217,7 @@ def get_model(model: str, variant: str = ''):
         download_if_not_exist(model, filepath)
         load_from_darknet(net, filepath)
     
-    if model in ['yolov5', 'yolov8', 'yolov10']:
+    if model in ['yolov5', 'yolov8', 'yolov10', 'yolov11']:
         load_from_ultralytics(net)
         has_obj = False
 
@@ -317,29 +316,34 @@ test('yolov10', 'm')
 test('yolov10', 'b')
 test('yolov10', 'l')
 test('yolov10', 'x')
+test('yolov11', 'n')
+test('yolov11', 's')
+test('yolov11', 'm')
+test('yolov11', 'l')
+test('yolov11', 'x')
 
-export('yolov3')
-export('yolov3-spp')
-export('yolov3-tiny')
-export('yolov4')
-export('yolov4-tiny')
-export('yolov5', 'n')
-export('yolov5', 's')
-export('yolov5', 'm')
-export('yolov5', 'l')
-export('yolov5', 'x')
-export('yolov6', 'n')
-export('yolov6', 's')
-export('yolov6', 'm')
-export('yolov7')
-export('yolov8', 'n')
-export('yolov8', 's')
-export('yolov8', 'm')
-export('yolov8', 'l')
-export('yolov8', 'x')
-export('yolov10', 'n')
-export('yolov10', 's')
-export('yolov10', 'm')
-export('yolov10', 'b')
-export('yolov10', 'l')
-export('yolov10', 'x')
+# export('yolov3')
+# export('yolov3-spp')
+# export('yolov3-tiny')
+# export('yolov4')
+# export('yolov4-tiny')
+# export('yolov5', 'n')
+# export('yolov5', 's')
+# export('yolov5', 'm')
+# export('yolov5', 'l')
+# export('yolov5', 'x')
+# export('yolov6', 'n')
+# export('yolov6', 's')
+# export('yolov6', 'm')
+# export('yolov7')
+# export('yolov8', 'n')
+# export('yolov8', 's')
+# export('yolov8', 'm')
+# export('yolov8', 'l')
+# export('yolov8', 'x')
+# export('yolov10', 'n')
+# export('yolov10', 's')
+# export('yolov10', 'm')
+# export('yolov10', 'b')
+# export('yolov10', 'l')
+# export('yolov10', 'x')

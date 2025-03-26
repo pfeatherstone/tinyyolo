@@ -1,7 +1,5 @@
-from   typing import Union
 from   copy import deepcopy
 from   functools import partial
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -701,11 +699,10 @@ class HeadV5(nn.Module):
 
     def forward(self, x4, x6, x9):
         x10 = self.n0(x9)
-        x13 = self.n1(torch.cat([self.up(x10),x6], 1))
-        x14 = self.n2(x13)                                      
-        x17 = self.n3(torch.cat([self.up(x14),x4], 1))  # 17 (P3/8-small)
+        x14 = self.n2(self.n1(torch.cat([self.up(x10),x6], 1)))                                      
+        x17 = self.n3(torch.cat([self.up(x14),x4],  1))  # 17 (P3/8-small)
         x20 = self.n5(torch.cat([self.n4(x17),x14], 1))
-        x23 = self.n7(torch.cat([self.n6(x20), x10], 1))
+        x23 = self.n7(torch.cat([self.n6(x20),x10], 1))
         return [x17, x20, x23]
 
 class HeadV8(nn.Module):
@@ -936,8 +933,10 @@ class DetectV3(nn.Module):
         return pred if not exists(targets) else (pred, {'iou': loss_iou, 'cls': loss_cls, 'obj': loss_obj})
 
 class Detect(nn.Module):
-    def __init__(self, nc=80, ch=()):
+    def __init__(self, nc=80, ch=(), v11=False):
         super().__init__()
+        def spconv(c1, c2, k): return nn.Sequential(Conv(c1,c1,k,g=c1),Conv(c1,c2,1))
+        conv = spconv if v11 else Conv
         self.nc         = nc                        # number of classes
         self.reg_max    = 16                        # DFL channels (ch[0] // 16 to scale 4/8/12/16/20 for n/s/m/l/x)
         self.no         = nc + self.reg_max * 4     # number of outputs per anchor
@@ -945,7 +944,7 @@ class Detect(nn.Module):
         self.c2         = max((16, ch[0] // 4, self.reg_max * 4))
         self.c3         = max(ch[0], min(self.nc, 100))  # channels
         self.cv2        = nn.ModuleList(nn.Sequential(Conv(x, self.c2, 3), Conv(self.c2, self.c2, 3), nn.Conv2d(self.c2, 4 * self.reg_max, 1)) for x in ch)
-        self.cv3        = nn.ModuleList(nn.Sequential(Conv(x, self.c3, 3), Conv(self.c3, self.c3, 3), nn.Conv2d(self.c3, self.nc, 1)) for x in ch)
+        self.cv3        = nn.ModuleList(nn.Sequential(conv(x, self.c3, 3), conv(self.c3, self.c3, 3), nn.Conv2d(self.c3, self.nc, 1)) for x in ch)
         self.r          = nn.Parameter(torch.arange(self.reg_max).float(), requires_grad=False)
   
     def forward_private(self, xs, cv2, cv3, targets=None):
@@ -1161,7 +1160,7 @@ class Yolov11(nn.Module):
         d, w, r   = get_variant_multiplesV11(variant)
         self.net  = BackboneV11(w, r, d, variant)
         self.fpn  = HeadV11(w, r, d, variant)
-        self.head = Detect(num_classes, ch=(int(256*w), int(512*w), int(512*w*r)))
+        self.head = Detect(num_classes, ch=(int(256*w), int(512*w), int(512*w*r)), v11=True)
 
     def forward(self, x):
         x = self.net(x)

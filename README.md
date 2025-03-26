@@ -31,7 +31,7 @@ If you like tiny code, Pytorch and Yolo, then you'll like TinyYolo.
 - [x] Yolov7
 - [x] Yolov8(n,s,m,l,x)
 - [x] Yolov10(n,s,m,b,l,x)
-- [ ] Yolov11(n,s,m,l,x)
+- [x] Yolov11(n,s,m,l,x)
 - [ ] Yolov12(n,s,m,l,x)
 
 ## Assigners ##
@@ -50,6 +50,7 @@ net = Yolov3(nc, spp=True).eval()
 # net = Yolov7(nc).eval()
 # net = Yolov8('n', nc).eval()
 # net = Yolov10('n', nc).eval()
+# net = Yolov11('n', nc).eval()
 
 # Inference only
 B = ... # Batch size

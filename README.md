@@ -32,7 +32,7 @@ If you like tiny code, Pytorch and Yolo, then you'll like TinyYolo.
 - [x] Yolov8(n,s,m,l,x)
 - [x] Yolov10(n,s,m,b,l,x)
 - [x] Yolov11(n,s,m,l,x)
-- [ ] Yolov12(n,s,m,l,x)
+- [x] Yolov12(n,s,m,l,x)
 
 ## Assigners ##
 - [x] [FCOS](https://arxiv.org/pdf/1904.01355)
@@ -137,8 +137,15 @@ onnx2tf -i /tmp/model.onnx -ois "img:1,3,640,640" -o /tmp/model
 
 * onnx-mlir is very slow and runs on 1 thread only. So onnxruntime is better for inferrence.
 
+* Yolov12's area attention is a bit misleading. It sounds like tiled attention, but no, more like rows.
+
+* Yolov12 doesn't have as much attention as you think. Only 1 extra layer of attention compared to Yolov11. The head has no attention. Look at the args. So what's the big deal. 
+
+* In my opinion there is little innovation in the new Yolo models. It's just tweaks.
+
+* Research should go into training recipes rather than chasing MAP scores. Come up with a way to train a model on COCO in under 5 epochs.
+
 ## TODO ##
 
 - [ ] Train everything (probably going to need some cloud compute (help))
 - [ ] Train with mixed precision
-- [ ] Maybe add Yolov9

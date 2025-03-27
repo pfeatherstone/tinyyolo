@@ -77,6 +77,9 @@ def get_variant_multiplesV11(variant: str):
         case 'l': return (1.00, 1.00, 1.0)
         case 'x': return (1.00, 1.50, 1.0)
 
+def get_variant_multiplesV12(variant: str):
+    return get_variant_multiplesV11(variant)
+
 def batchnorms(n: nn.Module):
     for m in n.modules():
         if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d)):
@@ -193,7 +196,7 @@ class C2f(nn.Module):
         super().__init__()
         self.c_  = int(c2 * e)  # hidden channels
         self.cv1 = Conv(c1, 2 * self.c_, 1)
-        self.cv2 = Conv((2 + n) * self.c_, c2, 1)  # optional act=FReLU(c2)
+        self.cv2 = Conv((2 + n) * self.c_, c2, 1)
         self.m   = nn.ModuleList(Bottleneck(self.c_, k=(3, 3), e=1.0, shortcut=shortcut) for _ in range(n))
 
     def forward(self, x):
@@ -315,26 +318,28 @@ class SPPCSPC(nn.Module):
         return self.cv7(torch.cat((y0, y4), dim=1))
 
 class Attention(nn.Module):
-    def __init__(self, dim, num_heads=8, attn_ratio=0.5):
+    def __init__(self, dim, num_heads=8, attn_ratio=0.5, area=None):
         super().__init__()
         self.num_heads  = num_heads
         self.dim_head   = dim // num_heads
         self.key_dim    = int(self.dim_head * attn_ratio)
+        self.area       = default(area, 1)
         h               = (self.dim_head + self.key_dim*2) * num_heads
+        k               = 7 if area else 3
         self.qkv        = Conv(dim, h, 1, act=nn.Identity())
         self.proj       = Conv(dim, dim, 1, act=nn.Identity())
-        self.pe         = Conv(dim, dim, 3, 1, g=dim, act=nn.Identity())
+        self.pe         = Conv(dim, dim, k, g=dim, act=nn.Identity())
 
     def forward(self, x):
         H, W    = x.shape[-2:]
-        q, k, v = rearrange(self.qkv(x), 'b (h d) y x -> b h (y x) d', h=self.num_heads).split([self.key_dim, self.key_dim, self.dim_head], -1)
+        q, k, v = rearrange(self.qkv(x), 'b (h d) (a y) x -> (b a) h (y x) d', h=self.num_heads, a=self.area).split([self.key_dim, self.key_dim, self.dim_head], -1)
         x       = F.scaled_dot_product_attention(q, k, v)
-        x, v    = map(lambda t: rearrange(t, 'b h (y x) d -> b (h d) y x', y=H, x=W), (x, v))
+        x, v    = map(lambda t: rearrange(t, '(b a) h (y x) d -> b (h d) (a y) x', x=W, a=self.area), (x, v))
         x       = self.proj(x + self.pe(v))
         return x
 
 def PSABlock(c, num_heads=4, attn_ratio=4):
-    return nn.Sequential(Residual(Attention(c, attn_ratio=attn_ratio, num_heads=num_heads)),
+    return nn.Sequential(Residual(Attention(c, num_heads=num_heads, attn_ratio=attn_ratio)),
                          Residual(nn.Sequential(Conv(c, c*2, 1), Conv(c*2, c, 1, act=nn.Identity()))))    
 
 class PSA(nn.Module):
@@ -348,6 +353,27 @@ class PSA(nn.Module):
     def forward(self, x):
         a, b = self.cv1(x).chunk(2, 1)
         return self.cv2(torch.cat((a, self.net(b)), 1))
+
+def ABlock(c, num_heads, area=1, mlp_ratio=1.2):
+    c_ = int(c*mlp_ratio)
+    return nn.Sequential(Residual(Attention(c, num_heads=num_heads, attn_ratio=1, area=area)),
+                         Residual(nn.Sequential(Conv(c, c_, 1), Conv(c_, c, 1, act=nn.Identity()))))    
+
+class A2C2f(nn.Module):
+    def __init__(self, c1, c2, n=1, shortcut=True, e=0.5, a2=True, residual=False, area=1, mlp_ratio=2.0):
+        super().__init__()
+        self.c_  = int(c2 * e)  # hidden channels
+        self.cv1 = Conv(c1, self.c_, 1)
+        self.cv2 = Conv((1 + n) * self.c_, c2, 1)
+        self.g   = nn.Parameter(0.01 * torch.ones(c2)) if (a2 and residual) else None
+        self.m   = nn.ModuleList(Repeat(ABlock(self.c_, self.c_//32, area, mlp_ratio), 2) if a2 else
+                                 C3(self.c_, self.c_, k=(3,3), shortcut=shortcut, n=2) for _ in range(n))
+
+    def forward(self, x):
+        y = [self.cv1(x)]
+        y.extend(m(y[-1]) for m in self.m)
+        y = self.cv2(torch.cat(y, 1))
+        return x + y * self.g[None,:,None,None] if exists(self.g) else y
 
 class Darknet53(nn.Module):
     def __init__(self):
@@ -553,16 +579,16 @@ class BackboneV11(nn.Module):
     def __init__(self, w, r, d, variant):
         super().__init__()
         c3k = variant in "mlx"
-        self.b0 = Conv(c1=3, c2=int(64*w), k=3, s=2)
-        self.b1 = Conv(int(64*w), int(128*w), k=3, s=2)
-        self.b2 = C3k2(c1=int(128*w), c2=int(256*w), n=round(2*d), e=0.25, c3k=c3k)
-        self.b3 = Conv(int(256*w), int(256*w), k=3, s=2)
-        self.b4 = C3k2(c1=int(256*w), c2=int(512*w), n=round(2*d), e=0.25, c3k=c3k)
-        self.b5 = Conv(int(512*w), int(512*w), k=3, s=2)
-        self.b6 = C3k2(c1=int(512*w), c2=int(512*w), n=round(2*d), e=0.50, c3k=True)
-        self.b7 = Conv(int(512*w), int(512*w*r), k=3, s=2)
+        self.b0 = Conv(c1=3,            c2=int(64*w),    k=3, s=2)
+        self.b1 = Conv(c1=int(64*w),    c2=int(128*w),   k=3, s=2)
+        self.b2 = C3k2(c1=int(128*w),   c2=int(256*w),   n=round(2*d), e=0.25, c3k=c3k)
+        self.b3 = Conv(c1=int(256*w),   c2=int(256*w),   k=3, s=2)
+        self.b4 = C3k2(c1=int(256*w),   c2=int(512*w),   n=round(2*d), e=0.25, c3k=c3k)
+        self.b5 = Conv(c1=int(512*w),   c2=int(512*w),   k=3, s=2)
+        self.b6 = C3k2(c1=int(512*w),   c2=int(512*w),   n=round(2*d), e=0.50, c3k=True)
+        self.b7 = Conv(c1=int(512*w),   c2=int(512*w*r), k=3, s=2)
         self.b8 = C3k2(c1=int(512*w*r), c2=int(512*w*r), n=round(2*d), e=0.50, c3k=True)
-        self.b9 = SPPF(int(512*w*r), int(512*w*r))
+        self.b9 = SPPF(c1=int(512*w*r), c2=int(512*w*r))
         self.b10 = PSA(int(512*w*r), n=round(2*d))
 
     def forward(self, x):
@@ -571,6 +597,26 @@ class BackboneV11(nn.Module):
         x10 = self.b10(self.b9(self.b8(self.b7(x6))))        # 10 P5/32
         return x4, x6, x10
 
+class BackboneV12(nn.Module):
+    def __init__(self, w, r, d, variant):
+        super().__init__()
+        c3k, res, mlp = variant in "mlx", variant in "lx", 1.2 if variant in "lx" else 2.0
+        self.b0 = Conv(c1=3,            c2=int(64*w),    k=3, s=2)
+        self.b1 = Conv(c1=int(64*w),    c2=int(128*w),   k=3, s=2)
+        self.b2 = C3k2(c1=int(128*w),   c2=int(256*w),   n=round(2*d), e=0.25, c3k=c3k)
+        self.b3 = Conv(c1=int(256*w),   c2=int(256*w),   k=3, s=2)
+        self.b4 = C3k2(c1=int(256*w),   c2=int(512*w),   n=round(2*d), e=0.25, c3k=c3k)
+        self.b5 = Conv(c1=int(512*w),   c2=int(512*w),   k=3, s=2)
+        self.b6 = A2C2f(c1=int(512*w),  c2=int(512*w),   n=round(4*d), a2=True, area=4, residual=res, mlp_ratio=mlp)
+        self.b7 = Conv(c1=int(512*w),   c2=int(512*w*r), k=3, s=2)
+        self.b8 = A2C2f(c1=int(512*w*r),c2=int(512*w*r), n=round(4*d), a2=True, area=1, residual=res, mlp_ratio=mlp)
+    
+    def forward(self, x):
+        x4 = self.b4(self.b3(self.b2(self.b1(self.b0(x))))) # 4 P3/8
+        x6 = self.b6(self.b5(x4))                           # 6 P4/16
+        x8 = self.b8(self.b7(x6))                           # 8 P5/32
+        return x4, x6, x8 
+        
 class EfficientRep(nn.Module):
     def __init__(self, w, d, cspsppf=False):
         super().__init__()
@@ -756,7 +802,7 @@ class HeadV11(nn.Module):
         self.n2 = C3k2(c1=int(512*w*2),     c2=int(256*w), n=round(2*d), c3k=c3k)
         self.n3 = Conv(c1=int(256*w),       c2=int(256*w), k=3, s=2)
         self.n4 = C3k2(c1=int(768*w),       c2=int(512*w), n=round(2*d), c3k=c3k)
-        self.n5 = Conv(c1=int(512* w),      c2=int(512*w), k=3, s=2)
+        self.n5 = Conv(c1=int(512*w),       c2=int(512*w), k=3, s=2)
         self.n6 = C3k2(c1=int(512*w*(1+r)), c2=int(512*w*r), n=round(2*d), c3k=True)
 
     def forward(self, x4, x6, x10):
@@ -765,6 +811,24 @@ class HeadV11(nn.Module):
         x19 = self.n4(torch.cat([self.n3(x16),x13], 1)) # 19 (P4/16-medium)
         x22 = self.n6(torch.cat([self.n5(x19),x10], 1)) # 22 (P5/32-large)
         return [x16, x19, x22]
+
+class HeadV12(nn.Module):
+    def __init__(self, w, r, d):
+        super().__init__()
+        self.up = nn.Upsample(scale_factor=2)
+        self.n1 = A2C2f(c1=int(512*w*(1+r)), c2=int(512*w), n=round(2*d), a2=False)
+        self.n2 = A2C2f(c1=int(512*w*2),     c2=int(256*w), n=round(2*d), a2=False)
+        self.n3 = Conv(c1=int(256*w),        c2=int(256*w), k=3, s=2)
+        self.n4 = A2C2f(c1=int(768*w),       c2=int(512*w), n=round(2*d), a2=False)
+        self.n5 = Conv(c1=int(512*w),        c2=int(512*w), k=3, s=2)
+        self.n6 = C3k2(c1=int(512*w*(1+r)),  c2=int(512*w*r), n=round(2*d), c3k=True)
+        
+    def forward(self, x4, x6, x8):
+        x11 = self.n1(torch.cat([self.up(x8),x6],   1)) # 11
+        x14 = self.n2(torch.cat([self.up(x11),x4],  1)) # 14 (P3/8-small)
+        x17 = self.n4(torch.cat([self.n3(x14),x11], 1)) # x17 (P4/16-medium)
+        x20 = self.n6(torch.cat([self.n5(x17),x8],  1)) # 20 (P5/32-large)
+        return [x14, x17, x20]
     
 class BiFusion(nn.Module):
     def __init__(self, c1, c2):
@@ -1166,7 +1230,21 @@ class Yolov11(nn.Module):
         x = self.net(x)
         x = self.fpn(*x)
         return self.head(x)
+
+class Yolov12(nn.Module):
+    def __init__(self, variant, num_classes):
+        super().__init__()
+        self.v    = variant
+        d, w, r   = get_variant_multiplesV12(variant)
+        self.net  = BackboneV12(w, r, d, variant)
+        self.fpn  = HeadV12(w, r, d)
+        self.head = Detect(num_classes, ch=(int(256*w), int(512*w), int(512*w*r)), v11=True)
     
+    def forward(self, x):
+        x = self.net(x)
+        x = self.fpn(*x)
+        return self.head(x)
+
 class Yolov6(nn.Module):
     def __init__(self, variant, num_classes):
         super().__init__()

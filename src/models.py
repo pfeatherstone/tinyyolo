@@ -262,9 +262,9 @@ def CIB(c1, c2, shortcut=True, e=0.5, lk=False):
                         Conv(c2, c2, 3, g=c2))
     return Residual(net) if shortcut else net
     
-def C2fCIB(c1, c2, n=1, shortcut=False, lk=False, e=0.5):
+def C2fCIB(c1, c2, n=1, shortcut=False, e=0.5, cib=True, lk=False):
     net   = C2f(c1, c2, n, shortcut, e)
-    net.m = nn.ModuleList(CIB(net.c_, net.c_, shortcut, e=1.0, lk=lk) for _ in range(n))
+    if cib: net.m = nn.ModuleList(CIB(net.c_, net.c_, shortcut, e=1.0, lk=lk) for _ in range(n))
     return net
 
 class Spp(nn.Module):
@@ -512,16 +512,16 @@ class BackboneV7(nn.Module):
 class BackboneV5(nn.Module):
     def __init__(self, w, r, d):
         super().__init__()
-        self.b0 = Conv(c1=3, c2=int(64*w), k=6, s=2, p=2)
-        self.b1 = Conv(int(64*w), int(128*w), k=3, s=2)
-        self.b2 = C3(c1=int(128*w), c2=int(128*w), n=round(3*d))
-        self.b3 = Conv(int(128*w), int(256*w), k=3, s=2)
-        self.b4 = C3(c1=int(256*w), c2=int(256*w), n=round(6*d))
-        self.b5 = Conv(int(256*w), int(512*w), k=3, s=2)
-        self.b6 = C3(c1=int(512*w), c2=int(512*w), n=round(9*d))
-        self.b7 = Conv(int(512*w), int(512*w*r), k=3, s=2)
-        self.b8 = C3(c1=int(512*w*r), c2=int(512*w*r), n=round(3*d))
-        self.b9 = SPPF(int(512*w*r), int(512*w*r))
+        self.b0 = Conv(c1=3,            c2=int(64*w),    k=6, s=2, p=2)
+        self.b1 = Conv(c1=int(64*w),    c2=int(128*w),   k=3, s=2)
+        self.b2 = C3(c1=int(128*w),     c2=int(128*w),   n=round(3*d))
+        self.b3 = Conv(c1=int(128*w),   c2=int(256*w),   k=3, s=2)
+        self.b4 = C3(c1=int(256*w),     c2=int(256*w),   n=round(6*d))
+        self.b5 = Conv(c1=int(256*w),   c2=int(512*w),   k=3, s=2)
+        self.b6 = C3(c1=int(512*w),     c2=int(512*w),   n=round(9*d))
+        self.b7 = Conv(c1=int(512*w),   c2=int(512*w*r), k=3, s=2)
+        self.b8 = C3(c1=int(512*w*r),   c2=int(512*w*r), n=round(3*d))
+        self.b9 = SPPF(c1=int(512*w*r), c2=int(512*w*r))
 
     def forward(self, x):
         x4 = self.b4(self.b3(self.b2(self.b1(self.b0(x))))) # 4 P3/8
@@ -532,16 +532,16 @@ class BackboneV5(nn.Module):
 class BackboneV8(nn.Module):
     def __init__(self, w, r, d):
         super().__init__()
-        self.b0 = Conv(c1=3, c2= int(64*w), k=3, s=2)
-        self.b1 = Conv(int(64*w), int(128*w), k=3, s=2)
-        self.b2 = C2f(c1=int(128*w), c2=int(128*w), n=round(3*d), shortcut=True)
-        self.b3 = Conv(int(128*w), int(256*w), k=3, s=2)
-        self.b4 = C2f(c1=int(256*w), c2=int(256*w), n=round(6*d), shortcut=True)
-        self.b5 = Conv(int(256*w), int(512*w), k=3, s=2)
-        self.b6 = C2f(c1=int(512*w), c2=int(512*w), n=round(6*d), shortcut=True)
-        self.b7 = Conv(int(512*w), int(512*w*r), k=3, s=2)
-        self.b8 = C2f(c1=int(512*w*r), c2=int(512*w*r), n=round(3*d), shortcut=True)
-        self.b9 = SPPF(int(512*w*r), int(512*w*r))
+        self.b0 = Conv(c1=3,            c2=int(64*w),    k=3, s=2)
+        self.b1 = Conv(c1=int(64*w),    c2=int(128*w),   k=3, s=2)
+        self.b2 = C2f(c1=int(128*w),    c2=int(128*w),   n=round(3*d), shortcut=True)
+        self.b3 = Conv(c1=int(128*w),   c2=int(256*w),   k=3, s=2)
+        self.b4 = C2f(c1=int(256*w),    c2=int(256*w),   n=round(6*d), shortcut=True)
+        self.b5 = Conv(c1=int(256*w),   c2=int(512*w),   k=3, s=2)
+        self.b6 = C2f(c1=int(512*w),    c2=int(512*w),   n=round(6*d), shortcut=True)
+        self.b7 = Conv(c1=int(512*w),   c2=int(512*w*r), k=3, s=2)
+        self.b8 = C2f(c1=int(512*w*r),  c2=int(512*w*r), n=round(3*d), shortcut=True)
+        self.b9 = SPPF(c1=int(512*w*r), c2=int(512*w*r))
 
     def forward(self, x):
         x4 = self.b4(self.b3(self.b2(self.b1(self.b0(x))))) # 4 P3/8
@@ -552,21 +552,16 @@ class BackboneV8(nn.Module):
 class BackboneV10(nn.Module):
     def __init__(self, w, r, d, variant):
         super().__init__()
-        self.b0 = Conv(c1=3, c2= int(64*w), k=3, s=2)
-        self.b1 = Conv(int(64*w), int(128*w), k=3, s=2)
-        self.b2 = C2f(c1=int(128*w), c2=int(128*w), n=round(3*d), shortcut=True)
-        self.b3 = Conv(int(128*w), int(256*w), k=3, s=2)
-        self.b4 = C2f(c1=int(256*w), c2=int(256*w), n=round(6*d), shortcut=True)
-        self.b5 = SCDown(int(256*w), int(512*w), k=3, s=2)
-        match variant:
-            case 'x': self.b6 = C2fCIB(c1=int(512*w), c2=int(512*w), n=round(6*d), shortcut=True)
-            case _  : self.b6 = C2f(c1=int(512*w), c2=int(512*w), n=round(6*d), shortcut=True)
-        self.b7 = SCDown(int(512*w), int(512*w*r), k=3, s=2)
-        match variant:
-            case 'n': self.b8 = C2f(c1=int(512*w*r), c2=int(512*w*r), n=round(3*d), shortcut=True)
-            case 's': self.b8 = C2fCIB(c1=int(512*w*r), c2=int(512*w*r), n=round(3*d), shortcut=True, lk=True)
-            case _  : self.b8 = C2fCIB(c1=int(512*w*r), c2=int(512*w*r), n=round(3*d), shortcut=True, lk=False)
-        self.b9 = SPPF(int(512*w*r), int(512*w*r))
+        self.b0 = Conv(c1=3,                c2= int(64*w),   k=3, s=2)
+        self.b1 = Conv(c1=int(64*w),        c2=int(128*w),   k=3, s=2)
+        self.b2 = C2f(c1=int(128*w),        c2=int(128*w),   n=round(3*d), shortcut=True)
+        self.b3 = Conv(c1=int(128*w),       c2=int(256*w),   k=3, s=2)
+        self.b4 = C2f(c1=int(256*w),        c2=int(256*w),   n=round(6*d), shortcut=True)
+        self.b5 = SCDown(c1=int(256*w),     c2=int(512*w),   k=3, s=2)
+        self.b6 = C2fCIB(c1=int(512*w),     c2=int(512*w),   n=round(6*d), shortcut=True, cib=variant=='x')
+        self.b7 = SCDown(c1=int(512*w),     c2=int(512*w*r), k=3, s=2)
+        self.b8 = C2fCIB(c1=int(512*w*r),   c2=int(512*w*r), n=round(3*d), shortcut=True, cib=not variant=='n', lk=variant=='s')
+        self.b9 = SPPF(c1=int(512*w*r),     c2=int(512*w*r))
         self.b10 = PSA(int(512*w*r))
 
     def forward(self, x):
@@ -773,18 +768,12 @@ class HeadV10(nn.Module):
     def __init__(self, w, r, d, variant):
         super().__init__()
         self.up = nn.Upsample(scale_factor=2)
-        match variant:
-            case 'n'|'s'|'m': self.n1 = C2f(c1=int(512*w*(1+r)), c2=int(512*w), n=round(3*d))
-            case _          : self.n1 = C2fCIB(c1=int(512*w*(1+r)), c2=int(512*w), n=round(3*d), shortcut=True)
-        self.n2 = C2f(c1=int(768*w), c2=int(256*w), n=round(3*d))
-        self.n3 = Conv(c1=int(256*w), c2=int(256*w), k=3, s=2)
-        match variant:
-            case 'n'|'s': self.n4 = C2f(c1=int(768*w), c2=int(512*w), n=round(3*d))
-            case _      : self.n4 = C2fCIB(c1=int(768*w), c2=int(512*w), n=round(3*d), shortcut=True)
-        self.n5 = SCDown(c1=int(512* w), c2=int(512 * w), k=3, s=2)
-        match variant:
-            case 'n'|'s': self.n6 = C2fCIB(c1=int(512*w*(1+r)), c2=int(512*w*r), n=round(3*d), shortcut=True, lk=True)
-            case _      : self.n6 = C2fCIB(c1=int(512*w*(1+r)), c2=int(512*w*r), n=round(3*d), shortcut=True, lk=False)
+        self.n1 = C2fCIB(c1=int(512*w*(1+r)),   c2=int(512*w),   n=round(3*d), shortcut=True, cib=variant in "blx")
+        self.n2 = C2f(c1=int(768*w),            c2=int(256*w),   n=round(3*d))
+        self.n3 = Conv(c1=int(256*w),           c2=int(256*w),   k=3, s=2)
+        self.n4 = C2fCIB(c1=int(768*w),         c2=int(512*w),   n=round(3*d), shortcut=True, cib=variant in "mblx")
+        self.n5 = SCDown(c1=int(512*w),         c2=int(512*w),   k=3, s=2)
+        self.n6 = C2fCIB(c1=int(512*w*(1+r)),   c2=int(512*w*r), n=round(3*d), shortcut=True, cib=True, lk=variant in "ns")
 
     def forward(self, x4, x6, x10):
         x13 = self.n1(torch.cat([self.up(x10),x6], 1))  # 13

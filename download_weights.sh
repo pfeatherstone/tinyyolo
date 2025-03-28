@@ -15,6 +15,11 @@ wget https://github.com/ultralytics/assets/releases/download/v8.2.0/yolov10m.pt 
 wget https://github.com/ultralytics/assets/releases/download/v8.2.0/yolov10b.pt -P weights
 wget https://github.com/ultralytics/assets/releases/download/v8.2.0/yolov10l.pt -P weights
 wget https://github.com/ultralytics/assets/releases/download/v8.2.0/yolov10x.pt -P weights
+wget https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n.pt  -O weights/yolo11n.pt
+wget https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11s.pt  -O weights/yolo11s.pt
+wget https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11m.pt  -O weights/yolo11m.pt
+wget https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11l.pt  -O weights/yolo11l.pt
+wget https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11x.pt  -O weights/yolo11x.pt
 
 # Yolov7 massaging
 git clone https://github.com/WongKinYiu/yolov7.git

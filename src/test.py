@@ -8,6 +8,7 @@ import  onnxruntime as ort
 import  onnxslim
 from    models import *
 
+
 class bcolors:
     HEADER      = '\033[95m'
     OKBLUE      = '\033[94m'
@@ -27,6 +28,7 @@ weight_paths = {
     'yolov4-tiny'   : 'https://github.com/AlexeyAB/darknet/releases/download/yolov4/yolov4-tiny.weights',
 }
 
+
 def download_if_not_exist(model_type: str, filepath: str):
     if not os.path.exists(filepath):
         torch.hub.download_url_to_file(weight_paths[model_type], filepath)
@@ -37,6 +39,19 @@ def swap_convs(cv1, cv2):
     state2 = deepcopy(cv2.state_dict())
     cv1.load_state_dict(state2)
     cv2.load_state_dict(state1)
+
+
+def fuse_bias_v12(cv: nn.Conv2d, bn: nn.BatchNorm2d):
+    if exists(cv.bias):
+        b_conv  = cv.bias.data
+        gamma   = bn.weight.data
+        beta    = bn.bias.data
+        mean    = bn.running_mean
+        var     = bn.running_var
+        eps     = bn.eps
+        bn.bias.data = beta + gamma * (b_conv - mean) / torch.sqrt(var + eps)
+        cv.bias = None  # PyTorch requires explicit removal
+        cv.register_parameter('bias', None)
 
 
 def load_from_darknet(net: Union[Yolov3, Yolov3Tiny, Yolov4, Yolov4Tiny], weights_path: str):
@@ -105,6 +120,7 @@ def load_from_darknet(net: Union[Yolov3, Yolov3Tiny, Yolov4, Yolov4Tiny], weight
 
 def load_from_ultralytics(net: Union[Yolov5, Yolov8, Yolov10, Yolov11]):
     from ultralytics import YOLO
+    from ultralytics.nn.modules.block import AAttn
 
     if isinstance(net, Yolov5):
         net2  = YOLO('yolov5{}u.pt'.format(net.v)).model.eval()
@@ -118,6 +134,12 @@ def load_from_ultralytics(net: Union[Yolov5, Yolov8, Yolov10, Yolov11]):
     elif isinstance(net, Yolov11):
         net2  = YOLO('yolo11{}.pt'.format(net.v)).model.eval()
         l0,l1 = 11,23
+    elif isinstance(net, Yolov12):
+        net2  = YOLO('yolo12{}.pt'.format(net.v)).model.eval()
+        l0,l1 = 9,21
+        for module in net2.modules():
+            if isinstance(module, AAttn):
+                fuse_bias_v12(module.pe.conv, module.pe.bn)
 
     assert (nP1 := count_parameters(net)) == (nP2 := count_parameters(net2)), f'wrong number of parameters net {nP1} vs ultralytics {nP2}'
     copy_params(net.net, net2.model[0:l0])
@@ -169,7 +191,7 @@ def load_from_yolov6_official(net: Yolov6, weights_pt: str):
 
 def load_from_yolov7_official(net: Yolov7, weights_pt: str):
     def params1():
-        for l in net.layers():
+        for l in [net.net, net.fpn, net.head.cv[0][0], net.head.cv[1][0], net.head.cv[2][0], net.head.cv[0][1], net.head.cv[1][1], net.head.cv[2][1]]:
             for k, v in l.state_dict().items():
                 if 'anchor' not in k:
                     yield v
@@ -206,6 +228,7 @@ def get_model(model: str, variant: str = ''):
         case 'yolov8':      net = Yolov8(variant, 80).eval()
         case 'yolov10':     net = Yolov10(variant, 80).eval()
         case 'yolov11':     net = Yolov11(variant, 80).eval()
+        case 'yolov12':     net = Yolov12(variant, 80).eval()
     
     print(f"{model}{variant} has {count_parameters(net)} parameters")
 
@@ -217,7 +240,7 @@ def get_model(model: str, variant: str = ''):
         download_if_not_exist(model, filepath)
         load_from_darknet(net, filepath)
     
-    if model in ['yolov5', 'yolov8', 'yolov10', 'yolov11']:
+    if model in ['yolov5', 'yolov8', 'yolov10', 'yolov11', 'yolov12']:
         load_from_ultralytics(net)
         has_obj = False
 
@@ -321,6 +344,11 @@ test('yolov11', 's')
 test('yolov11', 'm')
 test('yolov11', 'l')
 test('yolov11', 'x')
+test('yolov12', 'n')
+test('yolov12', 's')
+test('yolov12', 'm')
+test('yolov12', 'l')
+test('yolov12', 'x')
 
 # export('yolov3')
 # export('yolov3-spp')
@@ -352,3 +380,8 @@ test('yolov11', 'x')
 # export('yolov11', 'm')
 # export('yolov11', 'l')
 # export('yolov11', 'x')
+# export('yolov12', 'n')
+# export('yolov12', 's')
+# export('yolov12', 'm')
+# export('yolov12', 'l')
+# export('yolov12', 'x')

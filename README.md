@@ -51,6 +51,7 @@ net = Yolov3(nc, spp=True).eval()
 # net = Yolov8('n', nc).eval()
 # net = Yolov10('n', nc).eval()
 # net = Yolov11('n', nc).eval()
+# net = Yolov12('n', nc).eval()
 
 # Inference only
 B = ... # Batch size

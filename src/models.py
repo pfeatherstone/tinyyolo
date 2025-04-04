@@ -31,7 +31,6 @@ COCO_NAMES = [
 ANCHORS_V3      = [[(10,13), (16,30), (33,23)], [(30,61), (62,45), (59,119)], [(116,90), (156,198), (373,326)]]
 ANCHORS_V3_TINY = [[(10,14), (23,27), (37,58)], [(81,82), (135,169), (344,319)]]
 ANCHORS_V4      = [[(12,16), (19,36), (40,28)], [(36,75), (76,55), (72, 146)], [(142,110), (192,243), (459,401)]]
-ANCHORS_V7      = ANCHORS_V4
 
 actV3 = nn.LeakyReLU(negative_slope=0.1, inplace=True)
 actV4 = nn.Mish(inplace=True)
@@ -1046,7 +1045,7 @@ class DetectV10(Detect):
         self.one2one_cv3 = deepcopy(self.cv3)
         self.max_det = 100
     
-    def forward(self, x):
+    def forward(self, x, targets=None):
         # TODO: implement all the topk stuff. I think yolov10 doesn't need NMS. But you can you use it in inference mode for now.
         return self.forward_private(x, self.one2one_cv2, self.one2one_cv3)
 
@@ -1100,152 +1099,96 @@ class DetectV6(nn.Module):
 
         return pred if not exists(targets) else (pred, {'iou': loss_iou+loss_iou_distill, 'dfl': loss_dfl, 'cls': loss_cls})
     
-class Yolov3(nn.Module):
+class YoloBase(nn.Module):
+    def __init__(self, net, fpn, head, variant=None):
+        super().__init__()
+        self.v      = variant
+        self.net    = net
+        self.fpn    = fpn
+        self.head   = head
+    
+    def forward(self, x, targets=None):
+        x = self.net(x)
+        x = self.fpn(*x)
+        return self.head(x, targets=targets)
+    
+class Yolov3(YoloBase):
     def __init__(self, nclasses, spp):
-        super().__init__()
-        self.net  = Darknet53()
-        self.fpn  = HeadV3(spp)
-        self.head = DetectV3(nclasses, [8,16,32], ANCHORS_V3, [1,1,1], ch=[(128, 256), (256, 512), (512, 1024)])
+        super().__init__(Darknet53(),
+                         HeadV3(spp),
+                         DetectV3(nclasses, [8,16,32], ANCHORS_V3, [1,1,1], ch=[(128, 256), (256, 512), (512, 1024)]))
     
-    def forward(self, x, targets=None):
-        x = self.net(x)
-        x = self.fpn(*x)
-        return self.head(x, targets=targets)
-    
-class Yolov3Tiny(nn.Module):
+class Yolov3Tiny(YoloBase):
     def __init__(self, nclasses):
-        super().__init__()
-        self.net  = BackboneV3Tiny()
-        self.fpn  = HeadV3Tiny(1024)
-        self.head = DetectV3(nclasses, [16,32], ANCHORS_V3_TINY, [1,1], ch=[(384, 256), (256, 512)])
-
-    def forward(self, x, targets=None):
-        x = self.net(x)
-        x = self.fpn(*x)
-        return self.head(x, targets=targets)
+        super().__init__(BackboneV3Tiny(),
+                         HeadV3Tiny(1024),
+                         DetectV3(nclasses, [16,32], ANCHORS_V3_TINY, [1,1], ch=[(384, 256), (256, 512)]))
     
-class Yolov4(nn.Module):
+class Yolov4(YoloBase):
     def __init__(self, nclasses, act=actV4):
-        super().__init__()
-        self.net  = BackboneV4(act)
-        self.fpn  = HeadV4(actV3)
-        self.head = DetectV3(nclasses, [8,16,32], ANCHORS_V4, [1.2, 1.1, 1.05], ch=[(128, 256), (256, 512), (512, 1024)])
+        super().__init__(BackboneV4(act),
+                         HeadV4(actV3),
+                         DetectV3(nclasses, [8,16,32], ANCHORS_V4, [1.2, 1.1, 1.05], ch=[(128, 256), (256, 512), (512, 1024)]))
 
-    def forward(self, x, targets=None):
-        x = self.net(x)
-        x = self.fpn(*x)
-        return self.head(x, targets=targets)
-
-class Yolov4Tiny(nn.Module):
+class Yolov4Tiny(YoloBase):
     def __init__(self, nclasses):
-        super().__init__()
-        self.net  = BackboneV4Tiny()
-        self.fpn  = HeadV3Tiny(512)
-        self.head = DetectV3(nclasses, [16,32], ANCHORS_V3_TINY, [1.05,1.5], ch=[(384, 256), (256, 512)])
-    
-    def forward(self, x, targets=None):
-        x = self.net(x)
-        x = self.fpn(*x)
-        return self.head(x, targets=targets)
+        super().__init__(BackboneV4Tiny(),
+                         HeadV3Tiny(512),
+                         DetectV3(nclasses, [16,32], ANCHORS_V3_TINY, [1.05,1.5], ch=[(384, 256), (256, 512)]))
 
-class Yolov7(nn.Module):
+class Yolov7(YoloBase):
     def __init__(self, nclasses):
-        super().__init__()
-        ch = [(128,256), (256,512), (512,1024)]
-        self.net  = BackboneV7()
-        self.fpn  = HeadV7()
-        self.head = DetectV3(nclasses, [8,16,32], ANCHORS_V7, [2,2,2], ch=ch, is_v7=True)
+        super().__init__(BackboneV7(),
+                         HeadV7(),
+                         DetectV3(nclasses, [8,16,32], ANCHORS_V4, [2,2,2], ch=[(128,256), (256,512), (512,1024)], is_v7=True))
 
-    def layers(self):
-        return [self.net, self.fpn, self.head.cv[0][0], self.head.cv[1][0], self.head.cv[2][0], self.head.cv[0][1], self.head.cv[1][1], self.head.cv[2][1]]
-       
-    def forward(self, x, targets=None):
-        x = self.net(x)
-        x = self.fpn(*x)
-        return self.head(x, targets=targets)
-
-class Yolov5(nn.Module):
+class Yolov5(YoloBase):
     def __init__(self, variant, num_classes):
-        super().__init__()
-        self.v    = variant
-        d, w, r   = get_variant_multiplesV5(variant)
-        self.net  = BackboneV5(w, r, d)
-        self.fpn  = HeadV5(w, r, d)
-        self.head = Detect(num_classes, ch=(int(256*w), int(512*w), int(512*w*2)))
-
-    def forward(self, x, targets=None):
-        x = self.net(x)
-        x = self.fpn(*x)
-        return self.head(x, targets)
-
-class Yolov8(nn.Module):
+        d, w, r = get_variant_multiplesV5(variant)
+        super().__init__(BackboneV5(w, r, d),
+                         HeadV5(w, r, d),
+                         Detect(num_classes, ch=(int(256*w), int(512*w), int(512*w*2))),
+                         variant)
+        
+class Yolov8(YoloBase):
     def __init__(self, variant, num_classes):
-        super().__init__()
-        self.v    = variant
-        d, w, r   = get_variant_multiplesV8(variant)
-        self.net  = BackboneV8(w, r, d)
-        self.fpn  = HeadV8(w, r, d)
-        self.head = Detect(num_classes, ch=(int(256*w), int(512*w), int(512*w*r)))
+        d, w, r = get_variant_multiplesV8(variant)
+        super().__init__(BackboneV8(w, r, d),
+                         HeadV8(w, r, d),
+                         Detect(num_classes, ch=(int(256*w), int(512*w), int(512*w*r))),
+                         variant)
 
-    def forward(self, x, targets=None):
-        x = self.net(x)
-        x = self.fpn(*x)
-        return self.head(x, targets)
-
-class Yolov10(nn.Module):
+class Yolov10(YoloBase):
     def __init__(self, variant, num_classes):
-        super().__init__()
-        self.v    = variant
-        d, w, r   = get_variant_multiplesV10(variant)
-        self.net  = BackboneV10(w, r, d, variant)
-        self.fpn  = HeadV10(w, r, d, variant)
-        self.head = DetectV10(num_classes, ch=(int(256*w), int(512*w), int(512*w*r)))
+        d, w, r = get_variant_multiplesV10(variant)
+        super().__init__(BackboneV10(w, r, d, variant),
+                         HeadV10(w, r, d, variant),
+                         DetectV10(num_classes, ch=(int(256*w), int(512*w), int(512*w*r))),
+                         variant)
 
-    def forward(self, x):
-        x = self.net(x)
-        x = self.fpn(*x)
-        return self.head(x)
-
-class Yolov11(nn.Module):
+class Yolov11(YoloBase):
     def __init__(self, variant, num_classes):
-        super().__init__()
-        self.v    = variant
-        d, w, r   = get_variant_multiplesV11(variant)
-        self.net  = BackboneV11(w, r, d, variant)
-        self.fpn  = HeadV11(w, r, d, variant)
-        self.head = Detect(num_classes, ch=(int(256*w), int(512*w), int(512*w*r)), v11=True)
+        d, w, r = get_variant_multiplesV11(variant)
+        super().__init__(BackboneV11(w, r, d, variant),
+                         HeadV11(w, r, d, variant),
+                         Detect(num_classes, ch=(int(256*w), int(512*w), int(512*w*r)), v11=True),
+                         variant)
 
-    def forward(self, x):
-        x = self.net(x)
-        x = self.fpn(*x)
-        return self.head(x)
-
-class Yolov12(nn.Module):
+class Yolov12(YoloBase):
     def __init__(self, variant, num_classes):
-        super().__init__()
-        self.v    = variant
-        d, w, r   = get_variant_multiplesV12(variant)
-        self.net  = BackboneV12(w, r, d, variant)
-        self.fpn  = HeadV12(w, r, d)
-        self.head = Detect(num_classes, ch=(int(256*w), int(512*w), int(512*w*r)), v11=True)
-    
-    def forward(self, x):
-        x = self.net(x)
-        x = self.fpn(*x)
-        return self.head(x)
+        d, w, r = get_variant_multiplesV12(variant)
+        super().__init__(BackboneV12(w, r, d, variant),
+                         HeadV12(w, r, d),
+                         Detect(num_classes, ch=(int(256*w), int(512*w), int(512*w*r)), v11=True),
+                         variant)
 
-class Yolov6(nn.Module):
+class Yolov6(YoloBase):
     def __init__(self, variant, num_classes):
-        super().__init__()
         d, w, csp, csp_e, distill = get_variant_multiplesV6(variant)
-        self.net  = CSPBepBackbone(w, d, csp_e=csp_e)   if csp else EfficientRep(w, d, cspsppf=True)
-        self.fpn  = CSPRepBiFPANNeck(w, d, csp_e=csp_e) if csp else RepBiFPANNeck(w, d)
-        self.head = DetectV6(num_classes, ch=(int(128*w), int(256*w), int(512*w)), use_dfl=True, distill=distill)
-
-    def forward(self, x, targets=None):
-        x = self.net(x)
-        x = self.fpn(*x)
-        return self.head(x, targets)
+        super().__init__(CSPBepBackbone(w, d, csp_e=csp_e)   if csp else EfficientRep(w, d, cspsppf=True),
+                         CSPRepBiFPANNeck(w, d, csp_e=csp_e) if csp else RepBiFPANNeck(w, d),
+                         DetectV6(num_classes, ch=(int(128*w), int(256*w), int(512*w)), use_dfl=True, distill=distill),
+                         variant)
 
 @torch.no_grad()
 def nms(preds: torch.Tensor, conf_thresh: float, nms_thresh: float , has_objectness: bool):

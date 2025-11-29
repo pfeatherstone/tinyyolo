@@ -3,6 +3,7 @@ torch
 torchvision
 einops
 onnx
+onnxscript
 lightning
 tensorboard
 matplotlib

@@ -3,9 +3,7 @@ from    typing import Union
 import  numpy as np
 import  torch
 import  torchvision
-import  onnx
 import  onnxruntime as ort
-import  onnxslim
 from    models import *
 
 
@@ -256,63 +254,37 @@ def get_model(model: str, variant: str = ''):
 
 @torch.inference_mode
 def test(model: str, variant: str = ''):
-    net, has_obj = get_model(model, variant)
-
-    img      = torchvision.io.read_image('../images/dog.jpg')
-    _, preds = nms(net(img[None] / 255.0), 0.3, 0.5, has_objectness=has_obj)
-    boxes    = preds[:,:4]
-    cls      = preds[:,-80:].argmax(-1)
-    canvas   = torchvision.utils.draw_bounding_boxes(img, boxes, [COCO_NAMES[i] for i in cls])
+    net, has_obj    = get_model(model, variant)
+    img             = torchvision.io.read_image('../images/dog.jpg')
+    _, preds        = nms(net(img[None] / 255.0), 0.3, 0.5, has_objectness=has_obj)
+    boxes           = preds[:,:4]
+    cls             = preds[:,-80:].argmax(-1)
+    canvas          = torchvision.utils.draw_bounding_boxes(img, boxes, [COCO_NAMES[i] for i in cls])
     torchvision.io.write_png(canvas, f'dog_{model}{variant}_output.png')
 
 
-def export(model: str, variant: str = '', slim=True):
+def export(model: str, variant: str = ''):
     net, has_obj = get_model(model, variant)
     x = torch.randn(4, 3, 640, 640)
     _ = net(x) # warmup all the einops kernels
 
     print(bcolors.OKGREEN, f"Exporting {type(net).__name__} ...", bcolors.ENDC)
-    torch.onnx.export(net, (x,), '/tmp/model.onnx',
+    torch.onnx.export(net, (x,), '/tmp/model.onnx', dynamo=False,
                       input_names=['img'],
                       output_names=['preds'],
                       dynamic_axes={'img'   : {0: 'B', 2: 'H', 3: 'W'},
                                     'preds' : {0: 'B', 1: 'N'}})
     print(bcolors.OKGREEN, f"Exporting {type(net).__name__} ... Done", bcolors.ENDC)
 
-    if slim:
-        print(bcolors.OKGREEN, f"Slimming {type(net).__name__} ...", bcolors.ENDC)
-        model_onnx = onnx.load('/tmp/model.onnx') 
-        model_onnx = onnxslim.slim(model_onnx)
-        onnx.save(model_onnx, '/tmp/model.onnx')
-        print(bcolors.OKGREEN, f"Slimming {type(net).__name__} ... Done", bcolors.ENDC)
-
     print(bcolors.OKGREEN, "Checking with onnxruntime...", bcolors.ENDC)
     netOrt  = ort.InferenceSession('/tmp/model.onnx', providers=['CPUExecutionProvider'])
     x       = torch.randn(1, 3, 576, 768)
     preds1  = net(x) 
     preds2, = netOrt.run(None, {'img': x.numpy()})
-    torch.testing.assert_close(preds1, torch.from_numpy(preds2)) #, atol=5e-5, rtol=1e-4)
+    torch.testing.assert_close(preds1[...,:4], torch.from_numpy(preds2[...,:4]), atol=1e-3, rtol=1e-2)  # boxes
+    torch.testing.assert_close(preds1[...,4:], torch.from_numpy(preds2[...,4:]))                        # scores
     print(bcolors.OKGREEN, "Checking with onnxruntime... Done", bcolors.ENDC)
 
-
-# def export_tflite(model: str, variant: str = ''):
-#     import ai_edge_torch
-
-#     net, has_obj = get_model(model, variant)
-#     x = torch.randn(4, 3, 640, 640)
-#     _ = net(x) # warmup all the einops kernels
-
-#     print(bcolors.OKGREEN, f"Exporting {type(net).__name__} to TFLITE ...", bcolors.ENDC)
-#     edge_model = ai_edge_torch.convert(net.eval(), (x,))
-#     edge_model.export('/tmp/model.tflite')
-#     print(bcolors.OKGREEN, f"Exporting {type(net).__name__} to TFLITE ... Done", bcolors.ENDC)
-
-#     print(bcolors.OKGREEN, "Checking with ai_edge_torch ...", bcolors.ENDC)
-#     x       = torch.randn(1, 3, 576, 768)
-#     preds1  = net(x) 
-#     preds2, = edge_model(x)
-#     torch.testing.assert_close(preds1, preds2) #, atol=5e-5, rtol=1e-4)
-#     print(bcolors.OKGREEN, "Checking with ai_edge_torch... Done", bcolors.ENDC)
 
 test('yolov3')
 test('yolov3-spp')

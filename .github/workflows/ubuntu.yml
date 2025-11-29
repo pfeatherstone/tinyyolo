@@ -17,9 +17,6 @@ jobs:
       matrix:
         os: [ubuntu-22.04, ubuntu-24.04]
 
-    env:
-      TEST_RESULTS_DIR: ${{ github.workspace }}/test-results
-
     steps:
       - uses: actions/checkout@v5
 
@@ -31,24 +28,23 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run pytest
+      - name: Test
         run: |
-          mkdir -p "$TEST_RESULTS_DIR"
           cd src
-          pytest --junitxml="$TEST_RESULTS_DIR/results.xml" test_unit.py
+          pytest test_unit.py --doctest-modules --junitxml=junit/test-results-${{ matrix.os }}.xml
 
-      - name: Upload test results (JUnit XML)
-        if: always()
+      - name: Upload test results
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: pytorch-unit-test-results-${{ matrix.os }}
-          path: test-results/results.xml
+          name: pytest-results-${{ matrix.os }}
+          path: junit/test-results-${{ matrix.os }}.xml
 
       - name: Publish test report to PR
         if: always()
         uses: dorny/test-reporter@v1
         with:
           name: PyTorch Unit Tests (${{ matrix.os }})
-          path: test-results/results.xml
+          path: junit/test-results-${{ matrix.os }}.xml
           reporter: java-junit
           fail-on-error: "false"

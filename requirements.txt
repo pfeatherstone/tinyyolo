@@ -4,6 +4,7 @@ torch
 torchvision
 einops
 onnx
+onnxruntime
 onnxscript
 lightning
 tensorboard

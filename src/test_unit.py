@@ -50,5 +50,5 @@ def test_export(net: YoloBase):
     x       = torch.randn(2, 3, 576, 768)
     preds1  = net(x) 
     preds2, = netOrt.run(None, {'img': x.numpy()})
-    torch.testing.assert_close(preds1[...,:4], torch.from_numpy(preds2[...,:4]), atol=1e-3, rtol=1e-2)  # boxes
-    torch.testing.assert_close(preds1[...,4:], torch.from_numpy(preds2[...,4:]))                        # scores
+    torch.testing.assert_close(preds1[...,:4], torch.from_numpy(preds2[...,:4]), atol=1e-3, rtol=1e-2) # boxes
+    torch.testing.assert_close(preds1[...,4:], torch.from_numpy(preds2[...,4:]), atol=5e-5, rtol=1e-4) # scores

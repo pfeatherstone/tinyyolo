@@ -1,6 +1,7 @@
 import pytest
 import numpy as np
 import torch
+from   torch.export import Dim
 import onnxruntime as ort
 from   models import *
 
@@ -41,11 +42,10 @@ def test_export(net: YoloBase):
     net = net.eval()
     x = torch.randn(1, 3, 320, 320)
     _ = net(x) # compile einops kernels just in case
-    torch.onnx.export(net, (x,), '/tmp/model.onnx', dynamo=False,
-                    input_names=['img'],
-                    output_names=['preds'],
-                    dynamic_axes={'img'   : {0: 'B', 2: 'H', 3: 'W'},
-                                  'preds' : {0: 'B', 1: 'N'}})
+    torch.onnx.export(net, (x,), dynamo=True, opset_version=23,
+                      input_names=['img'],
+                      output_names=['preds'],
+                      dynamic_shapes={'x' : (Dim.DYNAMIC, Dim.STATIC, Dim.DYNAMIC, Dim.DYNAMIC)}).save('/tmp/model.onnx')
     netOrt  = ort.InferenceSession('/tmp/model.onnx', providers=['CPUExecutionProvider'])
     x       = torch.randn(2, 3, 576, 768)
     preds1  = net(x) 

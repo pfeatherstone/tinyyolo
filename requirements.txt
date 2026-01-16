@@ -4,6 +4,7 @@ torch
 torchvision
 einops
 onnx
+onnxslim
 onnxruntime
 onnxscript>=0.5.7
 lightning

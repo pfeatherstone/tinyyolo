@@ -2,7 +2,10 @@ import  os
 from    typing import Union
 import  numpy as np
 import  torch
+from    torch.export import Dim
 import  torchvision
+import  onnx
+import  onnxslim
 import  onnxruntime as ort
 from    models import *
 
@@ -263,21 +266,26 @@ def test(model: str, variant: str = ''):
     torchvision.io.write_png(canvas, f'dog_{model}{variant}_output.png')
 
 
-def export(model: str, variant: str = ''):
+def export(model: str, variant: str = '', onnx_path:str = '/tmp/model.onnx'):
     net, has_obj = get_model(model, variant)
     x = torch.randn(4, 3, 640, 640)
     _ = net(x) # warmup all the einops kernels
 
     print(bcolors.OKGREEN, f"Exporting {type(net).__name__} ...", bcolors.ENDC)
-    torch.onnx.export(net, (x,), '/tmp/model.onnx', dynamo=False,
+    torch.onnx.export(net, (x,), dynamo=True, opset_version=23,
                       input_names=['img'],
                       output_names=['preds'],
-                      dynamic_axes={'img'   : {0: 'B', 2: 'H', 3: 'W'},
-                                    'preds' : {0: 'B', 1: 'N'}})
+                      dynamic_shapes={'x' : (Dim.DYNAMIC, Dim.STATIC, Dim.DYNAMIC, Dim.DYNAMIC)}).save(onnx_path)
     print(bcolors.OKGREEN, f"Exporting {type(net).__name__} ... Done", bcolors.ENDC)
 
+    print(bcolors.OKGREEN, f"Slimming {type(net).__name__} ...", bcolors.ENDC)
+    model           = onnx.load(onnx_path)
+    slimmed_model   = onnxslim.slim(model)
+    onnx.save(slimmed_model, onnx_path)
+    print(bcolors.OKGREEN, f"Slimming {type(net).__name__} ... Done", bcolors.ENDC)
+
     print(bcolors.OKGREEN, "Checking with onnxruntime...", bcolors.ENDC)
-    netOrt  = ort.InferenceSession('/tmp/model.onnx', providers=['CPUExecutionProvider'])
+    netOrt  = ort.InferenceSession(onnx_path, providers=['CPUExecutionProvider'])
     x       = torch.randn(1, 3, 576, 768)
     preds1  = net(x) 
     preds2, = netOrt.run(None, {'img': x.numpy()})

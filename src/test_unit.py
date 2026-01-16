@@ -40,7 +40,7 @@ def test_forward(net: YoloBase):
 @torch.inference_mode()
 def test_export(net: YoloBase):
     net = net.eval()
-    x = torch.randn(1, 3, 320, 320)
+    x = torch.randn(4, 3, 640, 640)
     _ = net(x) # compile einops kernels just in case
     torch.onnx.export(net, (x,), dynamo=True, opset_version=23,
                       input_names=['img'],

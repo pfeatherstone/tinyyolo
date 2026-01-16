@@ -79,6 +79,9 @@ def get_variant_multiplesV11(variant: str):
 def get_variant_multiplesV12(variant: str):
     return get_variant_multiplesV11(variant)
 
+def get_variant_multiplesV26(variant: str):
+    return get_variant_multiplesV11(variant)
+
 def batchnorms(n: nn.Module):
     for m in n.modules():
         if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d)):
@@ -279,19 +282,20 @@ class Spp(nn.Module):
         return x
     
 class SPPF(nn.Module):
-    def __init__(self, c1, c2, act=nn.SiLU(True)):  # equivalent to SPP(k=(5, 9, 13))
+    def __init__(self, c1, c2, act=nn.SiLU(True), shortcut=False):  # equivalent to SPP(k=(5, 9, 13))
         super().__init__()
         c_          = c1 // 2  # hidden channels
-        conv        = partial(Conv, act=act)
-        self.cv1    = conv(c1, c_, 1, 1)
-        self.cv2    = conv(c_ * 4, c2, 1, 1)
+        self.add    = shortcut
+        self.cv1    = Conv(c1,   c_, 1, 1, act=act)
+        self.cv2    = Conv(c_*4, c2, 1, 1, act=act)
         self.m      = nn.MaxPool2d(kernel_size=5, stride=1, padding=2)
     def forward(self, x):
         x  = self.cv1(x)
         y1 = self.m(x)
         y2 = self.m(y1)
         y3 = self.m(y2)
-        return self.cv2(torch.cat((x, y1, y2, y3), 1))
+        y  = self.cv2(torch.cat((x, y1, y2, y3), 1))
+        return x+y if self.add else y
 
 class SPPCSPC(nn.Module):
     def __init__(self, c1, c2, e=0.5, act=nn.SiLU(True)):
@@ -570,7 +574,7 @@ class BackboneV10(nn.Module):
         return x4, x6, x10
 
 class BackboneV11(nn.Module):
-    def __init__(self, w, r, d, variant):
+    def __init__(self, w, r, d, variant, sppf_shortcut=False):
         super().__init__()
         c3k = variant in "mlx"
         self.b0 = Conv(c1=3,            c2=int(64*w),    k=3, s=2)
@@ -582,7 +586,7 @@ class BackboneV11(nn.Module):
         self.b6 = C3k2(c1=int(512*w),   c2=int(512*w),   n=round(2*d), e=0.50, c3k=True)
         self.b7 = Conv(c1=int(512*w),   c2=int(512*w*r), k=3, s=2)
         self.b8 = C3k2(c1=int(512*w*r), c2=int(512*w*r), n=round(2*d), e=0.50, c3k=True)
-        self.b9 = SPPF(c1=int(512*w*r), c2=int(512*w*r))
+        self.b9 = SPPF(c1=int(512*w*r), c2=int(512*w*r), shortcut=sppf_shortcut)
         self.b10 = PSA(int(512*w*r), n=round(2*d))
 
     def forward(self, x):
@@ -610,7 +614,11 @@ class BackboneV12(nn.Module):
         x6 = self.b6(self.b5(x4))                           # 6 P4/16
         x8 = self.b8(self.b7(x6))                           # 8 P5/32
         return x4, x6, x8 
-        
+
+class BackboneV26(BackboneV11):
+    def __init__(self, w, r, d, variant):
+        super().__init__(w, r, d, variant, sppf_shortcut=True)
+
 class EfficientRep(nn.Module):
     def __init__(self, w, d, cspsppf=False):
         super().__init__()

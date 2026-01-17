@@ -148,6 +148,8 @@ onnx2tf -i /tmp/model.onnx -ois "img:1,3,640,640" -o /tmp/model
 
 * Research should go into training recipes rather than chasing MAP scores. Come up with a way to train a model on COCO in under 5 epochs.
 
+* Very little model architecture changes between Yolo11 and Yolo26. SPPF has shortcut and there is a sprinkle more attention.
+
 ## TODO ##
 
 - [ ] Train everything (probably going to need some cloud compute (help))

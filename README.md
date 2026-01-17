@@ -150,6 +150,10 @@ onnx2tf -i /tmp/model.onnx -ois "img:1,3,640,640" -o /tmp/model
 
 * Very little model architecture changes between Yolo11 and Yolo26. SPPF has shortcut and there is a sprinkle more attention.
 
+* My understand of `end2end` training (YoloV10 and Yolo26) is you have two sets of normal V8 regression losses each with its own TAL assigner: one for one2many with topk set to 10 and another for one2one with topk set to 1. You minimise both losses with weights of 0.8 for one2many and 0.2 for one2one. These weights are then decayed and inversely decayed respectively. The idea is that the one2many branch gives lots of positive signal to the gradients which helps with training and helps refine the one2one branch. I think that's it. 
+
+* A good implementation of NMS in say C++ can be very fast. Not convinced removing NMS gives that much of a boost in performance as the ultralytics authors claim. Not convinced `end2end` training is necessary.
+
 ## TODO ##
 
 - [ ] Train everything (probably going to need some cloud compute (help))

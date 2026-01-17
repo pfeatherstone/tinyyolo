@@ -1033,23 +1033,6 @@ class Detect(nn.Module):
     def forward(self, xs, targets=None):
         return self.forward_private(xs, self.cv2, self.cv3, targets)
     
-class DetectV10(Detect):
-    def __init__(self, nc=80, ch=()):
-        super().__init__(nc, ch)
-        self.cv3 = nn.ModuleList(nn.Sequential(Conv(x, x, 3, g=x), 
-                                               Conv(x, self.c3, 1),
-                                               Conv(self.c3, self.c3, 3, g=self.c3), 
-                                               Conv(self.c3, self.c3, 1),
-                                               nn.Conv2d(self.c3, self.nc, 1)) for x in ch)
-
-        self.one2one_cv2 = deepcopy(self.cv2)
-        self.one2one_cv3 = deepcopy(self.cv3)
-        self.max_det = 100
-    
-    def forward(self, x, targets=None):
-        # TODO: implement all the topk stuff. I think yolov10 doesn't need NMS. But you can you use it in inference mode for now.
-        return self.forward_private(x, self.one2one_cv2, self.one2one_cv3)
-
 class DetectV6(nn.Module):
     def __init__(self, nc=80, ch=(), use_dfl=False, distill=False):
         super().__init__()
@@ -1148,7 +1131,7 @@ class Yolov5(YoloBase):
         d, w, r = get_variant_multiplesV5(variant)
         super().__init__(BackboneV5(w, r, d),
                          HeadV5(w, r, d),
-                         Detect(num_classes, ch=(int(256*w), int(512*w), int(512*w*2))),
+                         Detect(num_classes, ch=(int(256*w), int(512*w), int(512*w*2)), separable=False, dfl=True, end2end=False),
                          variant)
         
 class Yolov8(YoloBase):
@@ -1156,7 +1139,7 @@ class Yolov8(YoloBase):
         d, w, r = get_variant_multiplesV8(variant)
         super().__init__(BackboneV8(w, r, d),
                          HeadV8(w, r, d),
-                         Detect(num_classes, ch=(int(256*w), int(512*w), int(512*w*r))),
+                         Detect(num_classes, ch=(int(256*w), int(512*w), int(512*w*r)), separable=False, dfl=True, end2end=False),
                          variant)
 
 class Yolov10(YoloBase):
@@ -1164,7 +1147,7 @@ class Yolov10(YoloBase):
         d, w, r = get_variant_multiplesV10(variant)
         super().__init__(BackboneV10(w, r, d, variant),
                          HeadV10(w, r, d, variant),
-                         DetectV10(num_classes, ch=(int(256*w), int(512*w), int(512*w*r))),
+                         Detect(num_classes, ch=(int(256*w), int(512*w), int(512*w*r)), separable=True, dfl=True, end2end=True),
                          variant)
 
 class Yolov11(YoloBase):
@@ -1172,7 +1155,7 @@ class Yolov11(YoloBase):
         d, w, r = get_variant_multiplesV11(variant)
         super().__init__(BackboneV11(w, r, d, variant),
                          HeadV11(w, r, d, variant),
-                         Detect(num_classes, ch=(int(256*w), int(512*w), int(512*w*r)), separable=True),
+                         Detect(num_classes, ch=(int(256*w), int(512*w), int(512*w*r)), separable=True, dfl=True, end2end=False),
                          variant)
 
 class Yolov26(YoloBase):

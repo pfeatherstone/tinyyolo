@@ -19,6 +19,7 @@ def get_models():
     yield from [Yolov10(v, 80) for v in "nsmblx"]
     yield from [Yolov11(v, 80) for v in "nsmlx"]
     yield from [Yolov12(v, 80) for v in "nsmlx"]
+    yield from [Yolov26(v, 80) for v in "nsmlx"]
 
 
 @pytest.mark.parametrize("net", get_models())

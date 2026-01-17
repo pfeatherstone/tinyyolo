@@ -40,11 +40,11 @@ jobs:
           name: pytest-results-${{ matrix.os }}
           path: junit/test-results-${{ matrix.os }}.xml
 
-    #   - name: Publish test report to PR
-    #     if: always()
-    #     uses: dorny/test-reporter@v1
-    #     with:
-    #       name: PyTorch Unit Tests (${{ matrix.os }})
-    #       path: junit/test-results-${{ matrix.os }}.xml
-    #       reporter: java-junit
-    #       fail-on-error: "false"
+      - name: Test Report
+        uses: dorny/test-reporter@v2
+        if: ${{ always() }}
+        with:
+          name: PyTorch Unit Tests (${{ matrix.os }})
+          path: junit/test-results-${{ matrix.os }}.xml
+          reporter: jest-junit
+          fail-on-error: "false"

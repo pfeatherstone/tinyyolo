@@ -97,11 +97,6 @@ def copy_params(n1: nn.Module, n2: nn.Module):
         m1.running_var.data.copy_(m2.running_var.data)
         m1.eps      = m2.eps
         m1.momentum = m2.momentum
-   
-def init_batchnorms(net: nn.Module):
-    for m in batchnorms(net):
-        m.eps = 1e-3
-        m.momentum = 0.03
 
 def count_parameters(net: torch.nn.Module, include_stats=True):
     return sum(p.numel() for p in net.parameters()) + (sum(m.running_mean.numel() + m.running_var.numel() for m in batchnorms(net)) if include_stats else 0)
@@ -125,7 +120,7 @@ class Residual(nn.Module):
 class Conv(nn.Sequential):
     def __init__(self, c1, c2, k=1, s=1, p=None, g=1, act=nn.SiLU(True)):
         super().__init__(nn.Conv2d(c1, c2, k, s, default(p,k//2), groups=g, bias=False),
-                         nn.BatchNorm2d(c2),
+                         nn.BatchNorm2d(c2, eps=1e-3, momentum=0.03),
                          act)
 
 def Con5(c1, c2=None, spp=False, act=actV3):
@@ -220,9 +215,11 @@ class C3(nn.Module):
         b = self.m(self.cv2(x))
         return self.cv3(torch.cat((b, a), 1))
 
-def C3k2(c1, c2, n=1, shortcut=True, e=0.5, c3k=False):
+def C3k2(c1, c2, n=1, shortcut=True, e=0.5, c3k=False, attn=False):
     net = C2f(c1, c2, n, shortcut, e)
-    blk = C3(net.c_, net.c_, k=(3,3), shortcut=shortcut, n=2) if c3k else Bottleneck(net.c_, k=(3,3), shortcut=shortcut)
+    if   attn: blk = nn.Sequential(Bottleneck(net.c_, k=(3,3), shortcut=shortcut), PSABlock(net.c_, num_heads=net.c_//64, attn_ratio=0.5))
+    elif c3k:  blk = C3(net.c_, net.c_, k=(3,3), shortcut=shortcut, n=2)
+    else:      blk = Bottleneck(net.c_, k=(3,3), shortcut=shortcut)
     net.m = nn.ModuleList(deepcopy(blk) for _ in range(n))
     return net
 
@@ -282,20 +279,20 @@ class Spp(nn.Module):
         return x
     
 class SPPF(nn.Module):
-    def __init__(self, c1, c2, act=nn.SiLU(True), shortcut=False):  # equivalent to SPP(k=(5, 9, 13))
+    def __init__(self, c1, c2, acts=[nn.Identity(), nn.SiLU(True)], shortcut=False):  # equivalent to SPP(k=(5, 9, 13))
         super().__init__()
         c_          = c1 // 2  # hidden channels
-        self.add    = shortcut
-        self.cv1    = Conv(c1,   c_, 1, 1, act=act)
-        self.cv2    = Conv(c_*4, c2, 1, 1, act=act)
+        self.add    = shortcut and c1==c2
+        self.cv1    = Conv(c1,   c_, 1, 1, act=acts[0])
+        self.cv2    = Conv(c_*4, c2, 1, 1, act=acts[1])
         self.m      = nn.MaxPool2d(kernel_size=5, stride=1, padding=2)
-    def forward(self, x):
-        x  = self.cv1(x)
+    def forward(self, input):
+        x  = self.cv1(input)
         y1 = self.m(x)
         y2 = self.m(y1)
         y3 = self.m(y2)
         y  = self.cv2(torch.cat((x, y1, y2, y3), 1))
-        return x+y if self.add else y
+        return input+y if self.add else y
 
 class SPPCSPC(nn.Module):
     def __init__(self, c1, c2, e=0.5, act=nn.SiLU(True)):
@@ -341,9 +338,10 @@ class Attention(nn.Module):
         x       = self.proj(x + self.pe(v))
         return x
 
-def PSABlock(c, num_heads=4, attn_ratio=4):
-    return nn.Sequential(Residual(Attention(c, num_heads=num_heads, attn_ratio=attn_ratio)),
-                         Residual(nn.Sequential(Conv(c, c*2, 1), Conv(c*2, c, 1, act=nn.Identity()))))    
+def PSABlock(c, num_heads=4, attn_ratio=0.5, area=None, e=2):
+    c_ = int(c*e)
+    return nn.Sequential(Residual(Attention(c, num_heads=num_heads, attn_ratio=attn_ratio, area=area)),
+                         Residual(nn.Sequential(Conv(c, c_, 1), Conv(c_, c, 1, act=nn.Identity())))) 
 
 class PSA(nn.Module):
     def __init__(self, c, e=0.5, n=1):
@@ -351,16 +349,11 @@ class PSA(nn.Module):
         c_       = int(c * e)  # hidden channels
         self.cv1 = Conv(c,    2*c_, 1)
         self.cv2 = Conv(2*c_, c,    1)
-        self.net = Repeat(PSABlock(c_, num_heads=c_ // 64, attn_ratio=0.5), n)
+        self.net = Repeat(PSABlock(c_, num_heads=c_//64, attn_ratio=0.5), n)
         
     def forward(self, x):
         a, b = self.cv1(x).chunk(2, 1)
         return self.cv2(torch.cat((a, self.net(b)), 1))
-
-def ABlock(c, num_heads, area=1, mlp_ratio=1.2):
-    c_ = int(c*mlp_ratio)
-    return nn.Sequential(Residual(Attention(c, num_heads=num_heads, attn_ratio=1, area=area)),
-                         Residual(nn.Sequential(Conv(c, c_, 1), Conv(c_, c, 1, act=nn.Identity()))))    
 
 class A2C2f(nn.Module):
     def __init__(self, c1, c2, n=1, shortcut=True, e=0.5, a2=True, residual=False, area=1, mlp_ratio=2.0):
@@ -369,7 +362,7 @@ class A2C2f(nn.Module):
         self.cv1 = Conv(c1, self.c_, 1)
         self.cv2 = Conv((1 + n) * self.c_, c2, 1)
         self.g   = nn.Parameter(0.01 * torch.ones(c2)) if (a2 and residual) else None
-        self.m   = nn.ModuleList(Repeat(ABlock(self.c_, self.c_//32, area, mlp_ratio), 2) if a2 else
+        self.m   = nn.ModuleList(Repeat(PSABlock(self.c_, num_heads=self.c_//32, attn_ratio=1, area=area, e=mlp_ratio), 2) if a2 else
                                  C3(self.c_, self.c_, k=(3,3), shortcut=shortcut, n=2) for _ in range(n))
 
     def forward(self, x):
@@ -615,14 +608,10 @@ class BackboneV12(nn.Module):
         x8 = self.b8(self.b7(x6))                           # 8 P5/32
         return x4, x6, x8 
 
-class BackboneV26(BackboneV11):
-    def __init__(self, w, r, d, variant):
-        super().__init__(w, r, d, variant, sppf_shortcut=True)
-
 class EfficientRep(nn.Module):
     def __init__(self, w, d, cspsppf=False):
         super().__init__()
-        sppf    = partial(SPPCSPC, e=0.25) if cspsppf else SPPF
+        sppf    = partial(SPPCSPC, e=0.25, act=nn.ReLU(True)) if cspsppf else partial(SPPF, acts=[nn.ReLU(True), nn.ReLU(True)])
         self.b0 = RepConv( c1=3,          c2=int(64*w),  s=2, act=F.relu)
         self.b1 = RepConv( c1=int(64*w),  c2=int(128*w), s=2, act=F.relu)
         self.b2 = RepBlock(c1=int(128*w), c2=int(128*w), n=round(6*d))
@@ -632,7 +621,7 @@ class EfficientRep(nn.Module):
         self.b6 = RepBlock(c1=int(512*w), c2=int(512*w), n=round(18*d))
         self.b7 = RepConv( c1=int(512*w), c2=int(1024*w),s=2, act=F.relu)
         self.b8 = RepBlock(c1=int(1024*w),c2=int(1024*w),n=round(6*d))
-        self.b9 = sppf( c1=int(1024*w),c2=int(1024*w), act=nn.ReLU(True))
+        self.b9 = sppf(c1=int(1024*w),c2=int(1024*w))
 
     def forward(self, x):
         x4  = self.b2(self.b1(self.b0(x)))      # p2/4
@@ -644,7 +633,7 @@ class EfficientRep(nn.Module):
 class CSPBepBackbone(nn.Module):
     def __init__(self, w, d, csp_e=1/2, cspsppf=False):
         super().__init__()
-        sppf    = partial(SPPCSPC, e=0.25) if cspsppf else SPPF
+        sppf    = partial(SPPCSPC, e=0.25, act=nn.ReLU(True)) if cspsppf else partial(SPPF, acts=[nn.SiLU(), nn.SiLU()])
         self.b0 = RepConv(c1=3,          c2=int(64*w),  s=2, act=F.relu)
         self.b1 = RepConv(c1=int(64*w),  c2=int(128*w), s=2, act=F.relu)
         self.b2 = BepC3(  c1=int(128*w), c2=int(128*w), e=csp_e, n=round(6*d))
@@ -654,7 +643,7 @@ class CSPBepBackbone(nn.Module):
         self.b6 = BepC3(  c1=int(512*w), c2=int(512*w), e=csp_e, n=round(18*d))
         self.b7 = RepConv(c1=int(512*w), c2=int(1024*w),s=2, act=F.relu)
         self.b8 = BepC3(  c1=int(1024*w),c2=int(1024*w),e=csp_e, n=round(6*d))
-        self.b9 = sppf(   c1=int(1024*w),c2=int(1024*w), act=nn.ReLU(True))
+        self.b9 = sppf(   c1=int(1024*w),c2=int(1024*w))
 
     def forward(self, x):
         x4  = self.b2(self.b1(self.b0(x)))      # p2/4
@@ -790,16 +779,17 @@ class HeadV10(nn.Module):
         return [x16, x19, x22]
 
 class HeadV11(nn.Module):
-    def __init__(self, w, r, d, variant):
+    def __init__(self, w, r, d, variant, is26=False):
         super().__init__()
-        c3k = variant in "mlx"
+        c3k = True if is26 else variant in "mlx"
+        n   = 1    if is26 else 2
         self.up = nn.Upsample(scale_factor=2)
-        self.n1 = C3k2(c1=int(512*w*(1+r)), c2=int(512*w), n=round(2*d), c3k=c3k)
-        self.n2 = C3k2(c1=int(512*w*2),     c2=int(256*w), n=round(2*d), c3k=c3k)
-        self.n3 = Conv(c1=int(256*w),       c2=int(256*w), k=3, s=2)
-        self.n4 = C3k2(c1=int(768*w),       c2=int(512*w), n=round(2*d), c3k=c3k)
-        self.n5 = Conv(c1=int(512*w),       c2=int(512*w), k=3, s=2)
-        self.n6 = C3k2(c1=int(512*w*(1+r)), c2=int(512*w*r), n=round(2*d), c3k=True)
+        self.n1 = C3k2(c1=int(512*w*(1+r)), c2=int(512*w),   n=round(2*d), c3k=c3k)
+        self.n2 = C3k2(c1=int(512*w*2),     c2=int(256*w),   n=round(2*d), c3k=c3k)
+        self.n3 = Conv(c1=int(256*w),       c2=int(256*w),   k=3, s=2)
+        self.n4 = C3k2(c1=int(768*w),       c2=int(512*w),   n=round(2*d), c3k=c3k)
+        self.n5 = Conv(c1=int(512*w),       c2=int(512*w),   k=3, s=2)
+        self.n6 = C3k2(c1=int(512*w*(1+r)), c2=int(512*w*r), n=max(1,round(n*d)), c3k=True, attn=is26)
 
     def forward(self, x4, x6, x10):
         x13 = self.n1(torch.cat([self.up(x10),x6], 1))  # 13
@@ -993,20 +983,22 @@ class DetectV3(nn.Module):
         return pred if not exists(targets) else (pred, {'iou': loss_iou, 'cls': loss_cls, 'obj': loss_obj})
 
 class Detect(nn.Module):
-    def __init__(self, nc=80, ch=(), v11=False):
+    def __init__(self, nc=80, ch=(), dfl=True, separable=False, end2end=False):
         super().__init__()
         def spconv(c1, c2, k): return nn.Sequential(Conv(c1,c1,k,g=c1),Conv(c1,c2,1))
-        conv = spconv if v11 else Conv
+        conv = spconv if separable else Conv
         self.nc         = nc                        # number of classes
-        self.reg_max    = 16                        # DFL channels (ch[0] // 16 to scale 4/8/12/16/20 for n/s/m/l/x)
+        self.reg_max    = 16 if dfl else 1          # DFL channels (ch[0] // 16 to scale 4/8/12/16/20 for n/s/m/l/x)
         self.no         = nc + self.reg_max * 4     # number of outputs per anchor
         self.strides    = [8, 16, 32]               # strides computed during build
         self.c2         = max((16, ch[0] // 4, self.reg_max * 4))
         self.c3         = max(ch[0], min(self.nc, 100))  # channels
         self.cv2        = nn.ModuleList(nn.Sequential(Conv(x, self.c2, 3), Conv(self.c2, self.c2, 3), nn.Conv2d(self.c2, 4 * self.reg_max, 1)) for x in ch)
         self.cv3        = nn.ModuleList(nn.Sequential(conv(x, self.c3, 3), conv(self.c3, self.c3, 3), nn.Conv2d(self.c3, self.nc, 1)) for x in ch)
-        self.r          = nn.Parameter(torch.arange(self.reg_max).float(), requires_grad=False)
-  
+        self.r          = nn.Parameter(torch.arange(self.reg_max).float(), requires_grad=False) if dfl else None
+        if end2end: self.one2one_cv2 = deepcopy(self.cv2)
+        if end2end: self.one2one_cv3 = deepcopy(self.cv3)
+
     def forward_private(self, xs, cv2, cv3, targets=None):
         sxy, ps, strides = make_anchors(xs, self.strides)
         feats       = [rearrange(torch.cat((c1(x), c2(x)), 1), 'b f h w -> b (h w) f') for x,c1,c2 in zip(xs, cv2, cv3)]
@@ -1179,15 +1171,23 @@ class Yolov11(YoloBase):
         d, w, r = get_variant_multiplesV11(variant)
         super().__init__(BackboneV11(w, r, d, variant),
                          HeadV11(w, r, d, variant),
-                         Detect(num_classes, ch=(int(256*w), int(512*w), int(512*w*r)), v11=True),
+                         Detect(num_classes, ch=(int(256*w), int(512*w), int(512*w*r)), separable=True),
                          variant)
 
+class Yolov26(YoloBase):
+    def __init__(self, variant, num_classes):
+        d, w, r = get_variant_multiplesV26(variant)
+        super().__init__(BackboneV11(w, r, d, variant, sppf_shortcut=True),
+                         HeadV11(w, r, d, variant, is26=True),
+                         Detect(num_classes, ch=(int(256*w), int(512*w), int(512*w*r)), separable=True, dfl=False, end2end=True),
+                         variant)
+        
 class Yolov12(YoloBase):
     def __init__(self, variant, num_classes):
         d, w, r = get_variant_multiplesV12(variant)
         super().__init__(BackboneV12(w, r, d, variant),
                          HeadV12(w, r, d),
-                         Detect(num_classes, ch=(int(256*w), int(512*w), int(512*w*r)), v11=True),
+                         Detect(num_classes, ch=(int(256*w), int(512*w), int(512*w*r)), separable=True),
                          variant)
 
 class Yolov6(YoloBase):

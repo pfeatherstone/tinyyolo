@@ -31,11 +31,11 @@ jobs:
       - name: Test
         run: |
           cd src
-          pytest test_unit.py --doctest-modules --junitxml=junit/test-results-${{ matrix.os }}.xml
+          pytest test_unit.py --doctest-modules --junitxml=../junit/test-results-${{ matrix.os }}.xml
 
       - name: Upload test results
         if: ${{ always() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: pytest-results-${{ matrix.os }}
           path: junit/test-results-${{ matrix.os }}.xml

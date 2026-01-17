@@ -279,7 +279,7 @@ class Spp(nn.Module):
         return x
     
 class SPPF(nn.Module):
-    def __init__(self, c1, c2, acts=[nn.Identity(), nn.SiLU(True)], shortcut=False):  # equivalent to SPP(k=(5, 9, 13))
+    def __init__(self, c1, c2, acts=[nn.SiLU(True), nn.SiLU(True)], shortcut=False):  # equivalent to SPP(k=(5, 9, 13))
         super().__init__()
         c_          = c1 // 2  # hidden channels
         self.add    = shortcut and c1==c2
@@ -567,7 +567,7 @@ class BackboneV10(nn.Module):
         return x4, x6, x10
 
 class BackboneV11(nn.Module):
-    def __init__(self, w, r, d, variant, sppf_shortcut=False):
+    def __init__(self, w, r, d, variant, sppf_shortcut=False, sppf_acts=[nn.SiLU(True), nn.SiLU(True)]):
         super().__init__()
         c3k = variant in "mlx"
         self.b0 = Conv(c1=3,            c2=int(64*w),    k=3, s=2)
@@ -579,7 +579,7 @@ class BackboneV11(nn.Module):
         self.b6 = C3k2(c1=int(512*w),   c2=int(512*w),   n=round(2*d), e=0.50, c3k=True)
         self.b7 = Conv(c1=int(512*w),   c2=int(512*w*r), k=3, s=2)
         self.b8 = C3k2(c1=int(512*w*r), c2=int(512*w*r), n=round(2*d), e=0.50, c3k=True)
-        self.b9 = SPPF(c1=int(512*w*r), c2=int(512*w*r), shortcut=sppf_shortcut)
+        self.b9 = SPPF(c1=int(512*w*r), c2=int(512*w*r), shortcut=sppf_shortcut, acts=sppf_acts)
         self.b10 = PSA(int(512*w*r), n=round(2*d))
 
     def forward(self, x):
@@ -988,6 +988,7 @@ class Detect(nn.Module):
         def spconv(c1, c2, k): return nn.Sequential(Conv(c1,c1,k,g=c1),Conv(c1,c2,1))
         conv = spconv if separable else Conv
         self.nc         = nc                        # number of classes
+        self.dfl        = dfl
         self.reg_max    = 16 if dfl else 1          # DFL channels (ch[0] // 16 to scale 4/8/12/16/20 for n/s/m/l/x)
         self.no         = nc + self.reg_max * 4     # number of outputs per anchor
         self.strides    = [8, 16, 32]               # strides computed during build
@@ -1004,7 +1005,7 @@ class Detect(nn.Module):
         feats       = [rearrange(torch.cat((c1(x), c2(x)), 1), 'b f h w -> b (h w) f') for x,c1,c2 in zip(xs, cv2, cv3)]
         dist, cls   = torch.cat(feats, 1).split((4 * self.reg_max, self.nc), -1)
         dist        = rearrange(dist, 'b n (k r) -> b n k r', k=4)
-        ltrb        = torch.einsum('bnkr, r -> bnk', dist.softmax(-1), self.r)
+        ltrb        = torch.einsum('bnkr, r -> bnk', dist.softmax(-1), self.r) if self.dfl else dist.squeeze(-1)
         box         = dist2box(ltrb, sxy, strides)
         pred        = torch.cat((box, cls.sigmoid()), -1)
 
@@ -1177,7 +1178,7 @@ class Yolov11(YoloBase):
 class Yolov26(YoloBase):
     def __init__(self, variant, num_classes):
         d, w, r = get_variant_multiplesV26(variant)
-        super().__init__(BackboneV11(w, r, d, variant, sppf_shortcut=True),
+        super().__init__(BackboneV11(w, r, d, variant, sppf_shortcut=True, sppf_acts=[nn.Identity(), nn.SiLU(True)]),
                          HeadV11(w, r, d, variant, is26=True),
                          Detect(num_classes, ch=(int(256*w), int(512*w), int(512*w*r)), separable=True, dfl=False, end2end=True),
                          variant)

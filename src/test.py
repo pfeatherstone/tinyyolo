@@ -141,6 +141,9 @@ def load_from_ultralytics(net: Union[Yolov5, Yolov8, Yolov10, Yolov11]):
         for module in net2.modules():
             if isinstance(module, AAttn):
                 fuse_bias_v12(module.pe.conv, module.pe.bn)
+    elif isinstance(net, Yolov26):
+        net2  = YOLO('yolo26{}.pt'.format(net.v)).model.eval()
+        l0,l1 = 11,23
 
     assert (nP1 := count_parameters(net)) == (nP2 := count_parameters(net2)), f'wrong number of parameters net {nP1} vs ultralytics {nP2}'
     copy_params(net.net, net2.model[0:l0])
@@ -187,8 +190,6 @@ def load_from_yolov6_official(net: Yolov6, weights_pt: str):
         assert p1.shape == p2.shape, f"bad shape: {k} {p2.shape} {p1.shape}"
         p1.data.copy_(p2.data)
 
-    init_batchnorms(net)
-
 
 def load_from_yolov7_official(net: Yolov7, weights_pt: str):
     def params1():
@@ -205,8 +206,6 @@ def load_from_yolov7_official(net: Yolov7, weights_pt: str):
 
     for p1, p2 in zip(params1(), params2(), strict=True):
         p1.data.copy_(p2.data)
-
-    init_batchnorms(net)
 
     # Handle special case in SPPCSPC where Yolov6 and Yolov7 disagree on the order of the final torch.cat()
     for module in net.modules():
@@ -230,6 +229,7 @@ def get_model(model: str, variant: str = ''):
         case 'yolov10':     net = Yolov10(variant, 80).eval()
         case 'yolov11':     net = Yolov11(variant, 80).eval()
         case 'yolov12':     net = Yolov12(variant, 80).eval()
+        case 'yolov26':     net = Yolov26(variant, 80).eval()
     
     print(f"{model}{variant} has {count_parameters(net)} parameters")
 
@@ -241,7 +241,7 @@ def get_model(model: str, variant: str = ''):
         download_if_not_exist(model, filepath)
         load_from_darknet(net, filepath)
     
-    if model in ['yolov5', 'yolov8', 'yolov10', 'yolov11', 'yolov12']:
+    if model in ['yolov5', 'yolov8', 'yolov10', 'yolov11', 'yolov12', 'yolov26']:
         load_from_ultralytics(net)
         has_obj = False
 
@@ -293,7 +293,6 @@ def export(model: str, variant: str = '', onnx_path:str = '/tmp/model.onnx'):
     torch.testing.assert_close(preds1[...,4:], torch.from_numpy(preds2[...,4:]))                        # scores
     print(bcolors.OKGREEN, "Checking with onnxruntime... Done", bcolors.ENDC)
 
-
 test('yolov3')
 test('yolov3-spp')
 test('yolov3-tiny')
@@ -329,6 +328,11 @@ test('yolov12', 's')
 test('yolov12', 'm')
 test('yolov12', 'l')
 test('yolov12', 'x')
+test('yolov26', 'n')
+test('yolov26', 's')
+test('yolov26', 'm')
+test('yolov26', 'l')
+test('yolov26', 'x')
 
 # export('yolov3')
 # export('yolov3-spp')

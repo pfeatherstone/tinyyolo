@@ -1,5 +1,6 @@
 import argparse
 from   PIL import ImageFile
+import math
 import torch
 import torch.nn.functional as F
 import torch.utils.data
@@ -11,6 +12,7 @@ from   lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor
 import matplotlib.pyplot as plt
 from   models import *
 ImageFile.LOAD_TRUNCATED_IMAGES = True
+
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--nepochs",      type=int,   default=100,    help="Number of epochs")
@@ -24,6 +26,7 @@ parser.add_argument("--valAnn",       type=str,   required=True,  help="Validati
 parser.add_argument("--nworkers",     type=int,   default=0,      help="Number of data workers. If 0, set to mp.cpu_count()/2")
 args = parser.parse_args()
 args.nworkers = torch.multiprocessing.cpu_count() // 2 if args.nworkers == 0 else args.nworkers
+
 
 class CocoWrapper(torch.utils.data.Dataset):
     def __init__(self, root, annFile, transforms=[]):
@@ -46,6 +49,7 @@ class CocoWrapper(torch.utils.data.Dataset):
         target      = torch.cat([boxes,classes], -1)
         return img, target
 
+
 def CocoCollator(batch):
     imgs, targets   = zip(*batch)
     N               = max(t.shape[0] for t in targets)
@@ -57,37 +61,29 @@ def CocoCollator(batch):
     targets         = torch.stack(targets, 0)
     return imgs, targets
 
-def createOptimizer(self: torch.nn.Module, momentum=0.9, lr=0.001, decay=0.0001):
-    bn = tuple(v for k, v in nn.__dict__.items() if "Norm" in k)  # normalization layers
-    g  = [], [], []
-    for module_name, module in self.named_modules():
-        for param_name, param in module.named_parameters(recurse=False):
-            fullname = f"{module_name}.{param_name}" if module_name else param_name
-            if "bias" in fullname:  
-                g[2].append(param) # bias (no decay)
-            elif isinstance(module, bn):  
-                g[1].append(param) # weight (no decay)
-            else:  
-                g[0].append(param) # weight (with decay)
-    num_non_decayed_biases  = sum(p.numel() for p in g[2])
-    num_non_decayed_weights = sum(p.numel() for p in g[1])
-    num_decayed_weights     = sum(p.numel() for p in g[0])
-    print(f"num non-decayed biases  : {len(g[2])}, with {num_non_decayed_biases} parameters")
-    print(f"num non-decayed weights : {len(g[1])}, with {num_non_decayed_weights} parameters")
-    print(f"num decayed weights     : {len(g[0])}, with {num_decayed_weights} parameters")
-    assert num_non_decayed_biases + num_non_decayed_weights + num_decayed_weights == sum(p.numel() for p in self.parameters() if p.requires_grad)
-    optimizer = torch.optim.SGD(g[2], lr=lr, momentum=momentum, nesterov=True)
-    # optimizer = torch.optim.AdamW(g[2], lr=lr, betas=(momentum, 0.999), fused=True)
-    optimizer.add_param_group({"params": g[0], "weight_decay": decay})  # add g0 with weight_decay
-    optimizer.add_param_group({"params": g[1], "weight_decay": 0.0})  # add g1 (BatchNorm2d weights)
+
+def createOptimizer(module: torch.nn.Module, momentum=0.9, lr=0.001, decay=0.01):
+    wd_params    = [p for p in module.parameters() if p.dim() >= 2]
+    no_wd_params = [p for p in module.parameters() if p.dim() < 2]
+    optim_groups = [{'params': wd_params,    'weight_decay': decay},
+                    {'params': no_wd_params, 'weight_decay': 0.0}]
+    optimizer = torch.optim.AdamW(optim_groups, lr=lr, betas=(momentum, 0.99), fused=True)
     return optimizer
 
+
+def createScheduler(optimizer, total_steps, warmup_steps):
+    t0 = warmup_steps
+    t1 = total_steps
+    def fn0(t): return math.sin(t*math.pi/(2*t0))**2
+    def fn1(t): return math.cos((t-t0)*math.pi/(2*(t1-t0)))**2
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lambda t: fn0(t) if t < t0 else fn1(t))
+
+
 class LitModule(pl.LightningModule):
-    def __init__(self, net, nc, nsteps):
+    def __init__(self, net, nc):
         super().__init__()
         self.net = net
         self.nc  = nc
-        self.nsteps = nsteps
 
     def training_step(self, batch, batch_idx):
         return self.step(batch, batch_idx, self.trainer.num_training_batches, is_training=True)
@@ -98,26 +94,25 @@ class LitModule(pl.LightningModule):
     def step(self, batch, batch_idx, nbatches, is_training):
         imgs, targets = batch
         preds, losses = self.net(imgs, targets)
-        loss          = 7.5 * losses['iou'] + 0.5 * losses['cls'] + 0.5 * losses['obj']
-        # loss          = 7.5 * losses['iou'] + 0.5 * losses['cls'] + 1.5 * losses['dfl']
+        loss          = 7.5 * losses['iou'] + 0.5 * losses['cls'] + 0.5 * losses['obj'] + (losses['dfl'] if 'dfl' in losses else 0)
 
         label = "train" if is_training else "val"
-        self.log("loss/obj/"   + label, losses['obj'].item(),   logger=False, prog_bar=False, on_step=True)
-        # self.log("loss/dfl/"   + label, losses['dfl'].item(),   logger=False, prog_bar=False, on_step=True)
-        self.log("loss/cls/"   + label, losses['cls'].item(),   logger=False, prog_bar=False, on_step=True)
-        self.log("loss/iou/"   + label, losses['iou'].item(),   logger=False, prog_bar=False, on_step=True)
-        self.log("loss/sum/"   + label, loss.item(),            logger=False, prog_bar=True, on_step=True, on_epoch=True)
+        self.log("loss/sum/" + label, loss.item(), logger=False, prog_bar=True, on_step=True, on_epoch=True)
+        if 'obj' in losses: self.log("loss/obj/" + label, losses['obj'].item(), logger=False, prog_bar=False, on_step=True)
+        if 'dfl' in losses: self.log("loss/dfl/" + label, losses['dfl'].item(), logger=False, prog_bar=False, on_step=True)
+        if 'cls' in losses: self.log("loss/cls/" + label, losses['cls'].item(), logger=False, prog_bar=False, on_step=True)
+        if 'iou' in losses: self.log("loss/iou/" + label, losses['iou'].item(), logger=False, prog_bar=False, on_step=True)
 
         if self.trainer.is_global_zero:
             summary     = self.logger.experiment
             epoch       = self.current_epoch
             totalBatch  = (epoch + batch_idx / nbatches) * 1000
 
-            summary.add_scalars("loss/obj",   {label: losses['obj'].item()},   totalBatch)
-            # summary.add_scalars("loss/dfl",   {label: losses['dfl'].item()},   totalBatch)
-            summary.add_scalars("loss/cls",   {label: losses['cls'].item()},   totalBatch)
-            summary.add_scalars("loss/iou",   {label: losses['iou'].item()},   totalBatch)
-            summary.add_scalars("loss/sum",   {label: loss.item()},            totalBatch)
+            summary.add_scalars("loss/sum", {label: loss.item()}, totalBatch)
+            if 'obj' in losses: summary.add_scalars("loss/obj", {label: losses['obj'].item()}, totalBatch)
+            if 'dfl' in losses: summary.add_scalars("loss/dfl", {label: losses['dfl'].item()}, totalBatch)
+            if 'cls' in losses: summary.add_scalars("loss/cls", {label: losses['cls'].item()}, totalBatch)
+            if 'iou' in losses: summary.add_scalars("loss/iou", {label: losses['iou'].item()}, totalBatch)
 
             if batch_idx % 50 == 0:
                 with torch.no_grad():
@@ -133,11 +128,9 @@ class LitModule(pl.LightningModule):
         return loss
     
     def configure_optimizers(self):
-        optimizer = createOptimizer(self, lr=args.lr)
-        scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, 
-                                                        max_lr=[g['lr'] for g in optimizer.param_groups], 
-                                                        total_steps=self.nsteps,
-                                                        pct_start=args.nwarmup/self.nsteps)
+        total_steps = self.trainer.estimated_stepping_batches
+        optimizer   = createOptimizer(self, lr=args.lr)
+        scheduler   = createScheduler(optimizer, total_steps, args.nwarmup)
         return {'optimizer': optimizer, 'lr_scheduler': {'scheduler': scheduler, 'interval': "step", "frequency": 1}}
 
 torch.set_float32_matmul_precision('medium')
@@ -156,11 +149,9 @@ valset      = CocoWrapper(args.valRoot,   args.valAnn,   transforms=[v2.Resize((
 nclasses    = len(valset.names)
 trainLoader = torch.utils.data.DataLoader(trainset, batch_size=args.batchsize, shuffle=True, collate_fn=CocoCollator, num_workers=args.nworkers)
 valLoader   = torch.utils.data.DataLoader(valset, batch_size=args.batchsize, collate_fn=CocoCollator, num_workers=args.nworkers)
-nsteps      = len(trainLoader) * args.nepochs
 
-net = Yolov3(nclasses, spp=True)
-init_batchnorms(net)
-net = LitModule(net, nclasses, nsteps)
+net = Yolov26('n', nclasses)
+net = LitModule(net, nclasses)
 
 trainer = pl.Trainer(max_epochs=args.nepochs,
                      accelerator='gpu',

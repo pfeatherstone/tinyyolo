@@ -1189,26 +1189,3 @@ def nms(preds: torch.Tensor, conf_thresh: float, nms_thresh: float , has_objectn
     preds   = preds[nms]
     batch   = batch[nms]
     return batch, preds
-
-class BarlowTwinsHead(nn.Module):
-    def __init__(self, backbone, input_dim, hidden_dim=2048, output_dim=128):
-        super().__init__()
-        self.net  = backbone
-        self.proj = nn.Sequential(nn.Linear(input_dim, hidden_dim, bias=True),
-                                  nn.LayerNorm(hidden_dim),
-                                  nn.ReLU(),
-                                  nn.Linear(hidden_dim, output_dim, bias=False))
-
-    def forward(self, x):
-        x = self.net(x)[-1]
-        x = x.flatten(2).mean(2)
-        x = self.proj(x)
-        return x
-    
-def barlow_loss(z1, z2, lambda_coeff):
-    z1, z2      = map(lambda z: (z - z.mean(0)) / z.std(0), (z1,z2))
-    cross       = (z1.T @ z2) / z1.shape[0]
-    mask        = torch.eye(cross.shape[0], dtype=torch.bool, device=cross.device)
-    on_diag     = (cross[mask]-1).pow(2).sum()
-    off_diag    = cross[~mask].pow(2).sum()
-    return (on_diag + lambda_coeff * off_diag, cross)

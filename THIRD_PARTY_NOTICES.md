@@ -20,7 +20,7 @@ requirements on downstream applications.
 
 ---
 
-## Darknet (YOLOv3 / YOLOv4)
+## Darknet (YOLOv3)
 
 Source: https://github.com/pjreddie/darknet  
 License: MIT License
@@ -29,7 +29,7 @@ Pretrained yolov3 weights associated with Darknet are provided under the MIT Lic
 
 ---
 
-## Darknet ()
+## Darknet (YOLOv4)
 
 Source: https://github.com/AlexeyAB/darknet
 License: YOLO LICENSE

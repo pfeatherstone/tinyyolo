@@ -257,7 +257,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> tal (
     torch::Tensor       pred_scores,    // [B, N, nc]
     torch::Tensor       sxy,            // [N, 2]
     torch::Tensor       targets,        // [B, D, 5]
-    const long          topk,           // Number of candidates per pyramic level
+    const long          topk,
     const float         alpha,
     const float         beta
 )
@@ -290,14 +290,14 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> tal (
     std::vector<float>  metric(N);
     std::vector<float>  ious(N);
     std::vector<long>   indices(N);
-    std::vector<float>  best_ious(N);
+    std::vector<float>  best_metric(N);
     std::vector<long>   best_cls(N);
 
     for (long b = 0 ; b < B ; ++b)
     {
         // Running track of best IOU and best class for an anchor point
-        std::fill(begin(best_ious), end(best_ious), 0.0f);
-        std::fill(begin(best_cls), end(best_cls), 0);
+        std::fill(begin(best_metric), end(best_metric), 0.0f);
+        std::fill(begin(best_cls),    end(best_cls),    0);
 
         for (long d = 0 ; d < D ; ++d)
         {
@@ -311,7 +311,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> tal (
                 {
                     const box   pbox   = {pred_boxes_a[b][n][0], pred_boxes_a[b][n][1], pred_boxes_a[b][n][2], pred_boxes_a[b][n][3]};
                     const float pscore = pred_scores_a[b][n][tcls];
-                    ious[n]   = iou(tbox, pbox, CIOU);
+                    ious[n]   = iou(tbox, pbox, IOU);
                     metric[n] = pow(pscore, alpha) *  pow(ious[n], beta);
                 }
 
@@ -333,18 +333,20 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> tal (
                 // 4. Add to targets2
                 for (size_t i = 0 ; i < topk ; ++i)
                 {
-                    const long n = indices[i];
+                    const long  n     = indices[i];
+                    const float scale = max_metric > 0.f ? (max_iou / max_metric) : 0.f;
+                    const float t_hat = metric[n] * scale;
 
-                    if (contains(tbox, sxy_a[n][0], sxy_a[n][1]) && ious[n] > best_ious[n])
+                    if (contains(tbox, sxy_a[n][0], sxy_a[n][1]) && metric[n] > best_metric[n])
                     {
                         boxes_a[b][n][0]        = tbox[0];                       
                         boxes_a[b][n][1]        = tbox[1];
                         boxes_a[b][n][2]        = tbox[2];
                         boxes_a[b][n][3]        = tbox[3];
-                        scores_a[b][n]          = metric[n] * max_iou / max_metric;
+                        scores_a[b][n]          = t_hat;
                         classes_a[b][n][best_cls[n]] = 0; // Reset last class
                         classes_a[b][n][tcls]   = 1;
-                        best_ious[n]            = ious[n];
+                        best_metric[n]          = metric[n];
                         best_cls[n]             = tcls;
                     }
                 }

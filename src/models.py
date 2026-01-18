@@ -890,7 +890,7 @@ def make_anchors(feats, strides): # anchor-free
         xy      = rearrange([sx,sy], 'c h w -> (h w) c')
         xys.append(xy)
         strides2.append(torch.full((h*w,1), fill_value=stride, device=x.device))
-    return *pack(xys, '* c'), torch.cat(strides2,0)
+    return torch.cat(xys,0), torch.cat(strides2,0)
 
 @torch.no_grad()
 def make_anchors_ab(feats, strides, scales, anchors): # anchor-based
@@ -970,7 +970,7 @@ class DetectV3(nn.Module):
             mask                  = tscores > 0
 
             # CIOU loss (positive samples)
-            tgt_scores_sum = max(tscores.sum(), 1)
+            tgt_scores_sum = tscores.sum().clamp(min=1.0)
             weight   = tscores[mask]
             loss_iou = (torchvision.ops.complete_box_iou_loss(box[mask], tboxes[mask], reduction='none') * weight).sum() / tgt_scores_sum
             
@@ -1001,32 +1001,29 @@ class Detect(nn.Module):
         if end2end: self.one2one_cv3 = deepcopy(self.cv3)
 
     def forward_private(self, xs, cv2, cv3, targets=None):
-        sxy, ps, strides = make_anchors(xs, self.strides)
-        feats       = [rearrange(torch.cat((c1(x), c2(x)), 1), 'b f h w -> b (h w) f') for x,c1,c2 in zip(xs, cv2, cv3)]
-        dist, cls   = torch.cat(feats, 1).split((4 * self.reg_max, self.nc), -1)
-        dist        = rearrange(dist, 'b n (k r) -> b n k r', k=4)
-        ltrb        = torch.einsum('bnkr, r -> bnk', dist.softmax(-1), self.r) if self.dfl else dist.squeeze(-1)
-        box         = dist2box(ltrb, sxy, strides)
-        pred        = torch.cat((box, cls.sigmoid()), -1)
+        sxy, strides    = make_anchors(xs, self.strides)
+        feats           = [rearrange(torch.cat((c1(x), c2(x)), 1), 'b f h w -> b (h w) f') for x,c1,c2 in zip(xs, cv2, cv3)]
+        dist, logits    = torch.cat(feats, 1).split((4 * self.reg_max, self.nc), -1)
+        dist            = rearrange(dist, 'b n (k r) -> b n k r', k=4)
+        ltrb            = torch.einsum('bnkr, r -> bnk', dist.softmax(-1), self.r) if self.dfl else dist.squeeze(-1)
+        box             = dist2box(ltrb, sxy, strides)
+        probs           = logits.sigmoid()
+        pred            = torch.cat((box, probs), -1)
 
         if exists(targets):
-            # awh                     = torch.full_like(sxy, fill_value=5.0) * strides # Fake height and width for the sake of ATSS
-            # anchors                 = torch.cat([sxy-awh/2, sxy+awh/2],-1)
-            # tboxes, tscores, tcls   = assigner.atss(anchors, targets, [p[0] for p in ps], self.nc, 9)
-            tboxes, tscores, tcls   = assigner.tal(box, cls.sigmoid(), sxy, targets, 9, 0.5, 6.0)
-            # tboxes, tscores, tcls   = assigner.fcos(sxy, targets, self.nc)
-            mask                    = tscores > 0
+            tboxes, tscores, tcls = assigner.tal(box, probs, sxy, targets, 9, 0.5, 6.0)
+            mask                  = tscores > 0
 
             # CIOU loss (positive samples)
-            tgt_scores_sum = max(tscores.sum(), 1)
+            tgt_scores_sum = tscores.sum().clamp(min=1.0)
             weight   = tscores[mask]
             loss_iou = (torchvision.ops.complete_box_iou_loss(box[mask], tboxes[mask], reduction='none') * weight).sum() / tgt_scores_sum
 
             # DFL loss (positive samples)
-            loss_dfl = dfl_loss(tboxes, mask, tgt_scores_sum, sxy, strides, dist)
+            loss_dfl = dfl_loss(tboxes, mask, tgt_scores_sum, sxy, strides, dist) if self.dfl else torch.zeros((), device=box.device)
             
             # Class loss (positive samples + negative)
-            loss_cls = F.binary_cross_entropy_with_logits(cls, tcls*tscores.unsqueeze(-1), reduction='sum') / tgt_scores_sum
+            loss_cls = F.binary_cross_entropy_with_logits(logits, tcls*tscores.unsqueeze(-1), reduction='sum') / tgt_scores_sum
 
         return pred if not exists(targets) else (pred, {'iou': loss_iou, 'dfl': loss_dfl, 'cls': loss_cls})
         

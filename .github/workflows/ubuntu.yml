@@ -31,7 +31,7 @@ jobs:
       - name: Test
         run: |
           cd src
-          pytest test_unit.py --doctest-modules --junitxml=../junit/test-results-${{ matrix.os }}.xml
+          pytest unit.py --doctest-modules --junitxml=../junit/test-results-${{ matrix.os }}.xml
 
       - name: Upload test results
         if: ${{ always() }}

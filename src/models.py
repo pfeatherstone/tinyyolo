@@ -1047,7 +1047,7 @@ class DetectV6(nn.Module):
         self.r              = nn.Parameter(torch.arange(self.reg_max+1).float(), requires_grad=False) if use_dfl else None
     
     def forward(self, xs, targets=None):
-        sxy, ps, strides = make_anchors(xs, self.strides)
+        sxy, strides = make_anchors(xs, self.strides)
         xs          = [l(x) for l,x in zip(self.stems, xs)]
         cls         = torch.cat([rearrange(c2(c1(x)), 'b f h w -> b (h w) f') for c1,c2,x in zip(self.cls_convs, self.cls_preds, xs)], 1)
         reg         = [c1(x) for c1,x in zip(self.reg_convs, xs)]

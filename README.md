@@ -158,3 +158,10 @@ onnx2tf -i /tmp/model.onnx -ois "img:1,3,640,640" -o /tmp/model
 
 - [ ] Train everything (probably going to need some cloud compute (help))
 - [ ] Train with mixed precision
+
+## License
+
+This project is licensed under the MIT License. See the LICENSE file for details.
+
+Pretrained weights downloaded by helper scripts are subject to their own
+licenses. See THIRD_PARTY_NOTICES.md for details.

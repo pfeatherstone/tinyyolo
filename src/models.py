@@ -987,11 +987,10 @@ class Detect(nn.Module):
         super().__init__()
         def spconv(c1, c2, k): return nn.Sequential(Conv(c1,c1,k,g=c1),Conv(c1,c2,1))
         conv = spconv if separable else Conv
-        self.nc         = nc                        # number of classes
+        self.nc         = nc
         self.dfl        = dfl
-        self.reg_max    = 16 if dfl else 1          # DFL channels (ch[0] // 16 to scale 4/8/12/16/20 for n/s/m/l/x)
-        self.no         = nc + self.reg_max * 4     # number of outputs per anchor
-        self.strides    = [8, 16, 32]               # strides computed during build
+        self.reg_max    = 16 if dfl else 1
+        self.strides    = [8, 16, 32]
         self.c2         = max((16, ch[0] // 4, self.reg_max * 4))
         self.c3         = max(ch[0], min(self.nc, 100))  # channels
         self.cv2        = nn.ModuleList(nn.Sequential(Conv(x, self.c2, 3), Conv(self.c2, self.c2, 3), nn.Conv2d(self.c2, 4 * self.reg_max, 1)) for x in ch)

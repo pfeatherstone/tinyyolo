@@ -991,10 +991,10 @@ class Detect(nn.Module):
         self.dfl        = dfl
         self.reg_max    = 16 if dfl else 1
         self.strides    = [8, 16, 32]
-        self.c2         = max((16, ch[0] // 4, self.reg_max * 4))
-        self.c3         = max(ch[0], min(self.nc, 100))  # channels
-        self.cv2        = nn.ModuleList(nn.Sequential(Conv(x, self.c2, 3), Conv(self.c2, self.c2, 3), nn.Conv2d(self.c2, 4 * self.reg_max, 1)) for x in ch)
-        self.cv3        = nn.ModuleList(nn.Sequential(conv(x, self.c3, 3), conv(self.c3, self.c3, 3), nn.Conv2d(self.c3, self.nc, 1)) for x in ch)
+        c2              = max((16, ch[0] // 4, self.reg_max * 4))
+        c3              = max(ch[0], min(nc, 100))  # channels
+        self.cv2        = nn.ModuleList(nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1)) for x in ch)
+        self.cv3        = nn.ModuleList(nn.Sequential(conv(x, c3, 3), conv(c3, c3, 3), nn.Conv2d(c3, self.nc, 1)) for x in ch)
         self.r          = nn.Parameter(torch.arange(self.reg_max).float(), requires_grad=False) if dfl else None
         if end2end: self.one2one_cv2 = deepcopy(self.cv2)
         if end2end: self.one2one_cv3 = deepcopy(self.cv3)

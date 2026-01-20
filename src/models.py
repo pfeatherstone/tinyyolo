@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
 from   torch.utils.cpp_extension import load
-from   einops import rearrange, repeat, pack, unpack
+from   einops import rearrange, repeat
 
 assigner = load(name="assigner", sources=["assigner.cpp"], extra_cflags=["-O3", "-ffast-math", "-march=native", "-std=c++20"], verbose=True)
 
@@ -879,6 +879,13 @@ def dist2box(dist, sxy, strides):
     box     = torch.cat([x1y1,x2y2],-1)
     return box
 
+def box2dist(box, sxy, strides):
+    x1y1, x2y2 = box.chunk(2,2)
+    lt         = (sxy - x1y1) / strides
+    rb         = (x2y2 - sxy) / strides
+    dist       = torch.cat([lt,rb], -1)
+    return dist
+
 @torch.no_grad()
 def make_anchors(feats, strides): # anchor-free
     xys, strides2 = [], []
@@ -906,7 +913,7 @@ def make_anchors_ab(feats, strides, scales, anchors): # anchor-based
         awhs.append(awh)
         strides2.append(torch.full((a*h*w,1), fill_value=stride, device=x.device))
         scales2.append(torch.full((a*h*w,1), fill_value=scale, device=x.device))
-    return *pack(xys, '* c'), torch.cat(awhs,0), torch.cat(strides2,0), torch.cat(scales2,0)
+    return torch.cat(xys, 0), torch.cat(awhs,0), torch.cat(strides2,0), torch.cat(scales2,0)
 
 def dfl_loss (
     target_bbox,        # [B,N,4] (input resolution)
@@ -955,7 +962,7 @@ class DetectV3(nn.Module):
             case False: return awh * wh.exp()
     
     def forward(self, xs, targets=None):
-        sxy, ps, awh, strides, scales = make_anchors_ab(xs, self.strides, self.scales, self.anchors_wh)
+        sxy, awh, strides, scales = make_anchors_ab(xs, self.strides, self.scales, self.anchors_wh)
         feats           = [rearrange(n(x), 'b (a f) h w -> b (a h w) f', f=self.nc+5) for x,n in zip(xs, self.cv)]
         xy, wh, l, cls  = torch.cat(feats,1).split((2,2,1,self.nc), -1) 
         xy              = strides * ((xy.sigmoid() - 0.5) * scales) + sxy
@@ -964,14 +971,12 @@ class DetectV3(nn.Module):
         pred            = torch.cat([box, l.sigmoid(), cls.sigmoid()], -1)
 
         if exists(targets):
-            anchors               = torch.cat([sxy-awh/2, sxy+awh/2],-1)
-            tboxes, tscores, tcls = assigner.atss(anchors, targets, [p[0] for p in ps], self.nc, 9)
-            # tboxes, tscores, tcls = assigner.tal(box, cls.sigmoid(), sxy, targets, 9, 0.5, 6.0)
+            tboxes, tscores, tcls = assigner.fcos(sxy, targets, self.nc)
             mask                  = tscores > 0
+            weight                = tscores[mask]
+            tgt_scores_sum        = max(tscores.sum(), 1)
 
             # CIOU loss (positive samples)
-            tgt_scores_sum = tscores.sum().clamp(min=1.0)
-            weight   = tscores[mask]
             loss_iou = (torchvision.ops.complete_box_iou_loss(box[mask], tboxes[mask], reduction='none') * weight).sum() / tgt_scores_sum
             
             # Class loss (positive samples)
@@ -994,7 +999,7 @@ class Detect(nn.Module):
         c2              = max((16, ch[0] // 4, self.reg_max * 4))
         c3              = max(ch[0], min(nc, 100))  # channels
         self.cv2        = nn.ModuleList(nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1)) for x in ch)
-        self.cv3        = nn.ModuleList(nn.Sequential(conv(x, c3, 3), conv(c3, c3, 3), nn.Conv2d(c3, self.nc, 1)) for x in ch)
+        self.cv3        = nn.ModuleList(nn.Sequential(conv(x, c3, 3), conv(c3, c3, 3), nn.Conv2d(c3, nc, 1)) for x in ch)
         self.r          = nn.Parameter(torch.arange(self.reg_max).float(), requires_grad=False) if dfl else None
         if end2end: self.one2one_cv2 = deepcopy(self.cv2)
         if end2end: self.one2one_cv3 = deepcopy(self.cv3)
@@ -1010,16 +1015,17 @@ class Detect(nn.Module):
         pred            = torch.cat((box, probs), -1)
 
         if exists(targets):
-            tboxes, tscores, tcls = assigner.tal(box, probs, sxy, targets, 9, 0.5, 6.0)
+            tboxes, tscores, tcls = assigner.tal(box.detach(), probs.detach(), targets, 9, 0.5, 6.0)
             mask                  = tscores > 0
+            weight                = tscores[mask]
+            tgt_scores_sum        = max(tscores.sum(), 1)
 
             # CIOU loss (positive samples)
-            tgt_scores_sum = tscores.sum().clamp(min=1.0)
-            weight   = tscores[mask]
             loss_iou = (torchvision.ops.complete_box_iou_loss(box[mask], tboxes[mask], reduction='none') * weight).sum() / tgt_scores_sum
 
             # DFL loss (positive samples)
-            loss_dfl = dfl_loss(tboxes, mask, tgt_scores_sum, sxy, strides, dist) if self.dfl else torch.zeros((), device=box.device)
+            if self.dfl: loss_dfl = dfl_loss(tboxes, mask, tgt_scores_sum, sxy, strides, dist)
+            else:        loss_dfl = (F.l1_loss(ltrb[mask], box2dist(tboxes, sxy, strides)[mask], reduction='none') * weight.unsqueeze(-1)).sum() / tgt_scores_sum
             
             # Class loss (positive samples + negative)
             loss_cls = F.binary_cross_entropy_with_logits(logits, tcls*tscores.unsqueeze(-1), reduction='sum') / tgt_scores_sum

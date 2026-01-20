@@ -255,7 +255,6 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> atss (
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> tal (
     torch::Tensor       pred_boxes,     // [B, N, 4]
     torch::Tensor       pred_scores,    // [B, N, nc]
-    torch::Tensor       sxy,            // [N, 2]
     torch::Tensor       targets,        // [B, D, 5]
     const long          topk,
     const float         alpha,
@@ -269,7 +268,6 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> tal (
     auto device    = pred_boxes.device();
     pred_boxes     = pred_boxes.to(torch::TensorOptions(torch::Device("cpu")));
     pred_scores    = pred_scores.to(torch::TensorOptions(torch::Device("cpu")));
-    sxy            = sxy.to(torch::TensorOptions(torch::Device("cpu")));
     targets        = targets.to(torch::TensorOptions(torch::Device("cpu")));
 
     // Outputs 
@@ -280,7 +278,6 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> tal (
     // Accessors
     auto pred_boxes_a   = pred_boxes.accessor<float,3>();
     auto pred_scores_a  = pred_scores.accessor<float,3>();
-    auto sxy_a          = sxy.accessor<float,2>();
     auto targets_a      = targets.accessor<float,3>();
     auto boxes_a        = boxes.accessor<float,3>();
     auto scores_a       = scores.accessor<float,2>();
@@ -312,7 +309,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> tal (
                     const box   pbox   = {pred_boxes_a[b][n][0], pred_boxes_a[b][n][1], pred_boxes_a[b][n][2], pred_boxes_a[b][n][3]};
                     const float pscore = pred_scores_a[b][n][tcls];
                     ious[n]   = iou(tbox, pbox, IOU);
-                    metric[n] = pow(pscore, alpha) *  pow(ious[n], beta);
+                    metric[n] = pow(pscore, alpha) * pow(ious[n], beta);
                 }
 
                 // 2. Select topk
@@ -337,7 +334,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> tal (
                     const float scale = max_metric > 0.f ? (max_iou / max_metric) : 0.f;
                     const float t_hat = metric[n] * scale;
 
-                    if (contains(tbox, sxy_a[n][0], sxy_a[n][1]) && metric[n] > best_metric[n])
+                    if (metric[n] > best_metric[n])
                     {
                         boxes_a[b][n][0]        = tbox[0];                       
                         boxes_a[b][n][1]        = tbox[1];

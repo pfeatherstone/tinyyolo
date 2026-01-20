@@ -62,20 +62,22 @@ def CocoCollator(batch):
     return imgs, targets
 
 
-def createOptimizer(module: torch.nn.Module, momentum=0.9, lr=0.001, decay=0.01):
+def createOptimizer(module: torch.nn.Module, momentum=0.9, lr=0.001, decay=1e-4):
     wd_params    = [p for p in module.parameters() if p.dim() >= 2]
     no_wd_params = [p for p in module.parameters() if p.dim() < 2]
     optim_groups = [{'params': wd_params,    'weight_decay': decay},
                     {'params': no_wd_params, 'weight_decay': 0.0}]
-    optimizer = torch.optim.AdamW(optim_groups, lr=lr, betas=(momentum, 0.99), fused=True)
+    optimizer = torch.optim.AdamW(optim_groups, lr=lr, betas=(momentum, 0.999), fused=True)
     return optimizer
 
 
-def createScheduler(optimizer, total_steps, warmup_steps):
+def createScheduler(optimizer, init_lr_mult, final_lr_mult, total_steps, warmup_steps):
     t0 = warmup_steps
     t1 = total_steps
-    def fn0(t): return math.sin(t*math.pi/(2*t0))**2
-    def fn1(t): return math.cos((t-t0)*math.pi/(2*(t1-t0)))**2
+    s0 = init_lr_mult
+    s1 = final_lr_mult
+    def fn0(t): return math.sin(t*math.pi/(2*t0))**2 * (1-s0) + s0
+    def fn1(t): return math.cos((t-t0)*math.pi/(2*(t1-t0)))**2 * (1-s1) + s1
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lambda t: fn0(t) if t < t0 else fn1(t))
 
 
@@ -94,7 +96,10 @@ class LitModule(pl.LightningModule):
     def step(self, batch, batch_idx, nbatches, is_training):
         imgs, targets = batch
         preds, losses = self.net(imgs, targets)
-        loss          = 7.5 * losses['iou'] + 0.5 * losses['cls'] + 0.5 * losses['obj'] + (losses['dfl'] if 'dfl' in losses else 0)
+        loss          = 7.5 * losses['iou'] + \
+                        1.0 * losses['cls'] + \
+                        (1.0 * losses['obj'] if 'obj' in losses else 0.) + \
+                        (1.0 * losses['dfl'] if 'dfl' in losses else 0)
 
         label = "train" if is_training else "val"
         self.log("loss/sum/" + label, loss.item(), logger=False, prog_bar=True, on_step=True, on_epoch=True)
@@ -119,18 +124,19 @@ class LitModule(pl.LightningModule):
                     nfeats   = preds.shape[-1]
                     has_obj  = (nfeats - 4 - self.nc) > 0
                     _, preds = nms(preds[0:1], 0.3, 0.5, has_obj)
-                    img      = (imgs[0]*255).to(torch.uint8)
-                    canvas   = torchvision.utils.draw_bounding_boxes(img, preds[:,:4], [COCO_NAMES[i] for i in preds[:, -self.nc:].argmax(-1).long()])
-                    fig = plt.figure()
-                    plt.imshow(canvas.permute(1,2,0).cpu())
-                    summary.add_figure('preds/'+label, fig, totalBatch)
+                    if len(preds) > 0 and len(preds) < 20:
+                        img      = (imgs[0]*255).to(torch.uint8)
+                        canvas   = torchvision.utils.draw_bounding_boxes(img, preds[:,:4], [COCO_NAMES[i] for i in preds[:, -self.nc:].argmax(-1).long()])
+                        fig = plt.figure()
+                        plt.imshow(canvas.permute(1,2,0).cpu())
+                        summary.add_figure('preds/'+label, fig, totalBatch)
         self.trainer.strategy.barrier()
         return loss
     
     def configure_optimizers(self):
         total_steps = self.trainer.estimated_stepping_batches
         optimizer   = createOptimizer(self, lr=args.lr)
-        scheduler   = createScheduler(optimizer, total_steps, args.nwarmup)
+        scheduler   = createScheduler(optimizer, 0.04, 1e-4, total_steps, args.nwarmup)
         return {'optimizer': optimizer, 'lr_scheduler': {'scheduler': scheduler, 'interval': "step", "frequency": 1}}
 
 torch.set_float32_matmul_precision('medium')

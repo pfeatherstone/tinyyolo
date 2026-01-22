@@ -107,6 +107,9 @@ def exists(val):
 def default(val, d):
     return val if exists(val) else d
 
+def default_lazy(x, fn):
+    return x if exists(x) else fn()
+
 def Repeat(module, N):
     return nn.Sequential(*[deepcopy(module) for _ in range(N)])
 
@@ -886,6 +889,15 @@ def box2dist(box, sxy, strides):
     dist       = torch.cat([lt,rb], -1)
     return dist
 
+def focal_loss(logits, scores, soft_targets, gamma: float = 2.0, reduction: str = 'sum'):
+    p       = default_lazy(scores, lambda: logits.sigmoid())
+    bce     = F.binary_cross_entropy_with_logits(logits, soft_targets, reduction="none")
+    mod     = (p - soft_targets).abs().pow(gamma)
+    loss    = bce*mod
+    if   reduction == 'sum':  loss = loss.sum()
+    elif reduction == 'mean': loss = loss.mean()
+    return loss
+
 @torch.no_grad()
 def make_anchors(feats, strides): # anchor-free
     xys, strides2 = [], []
@@ -1028,7 +1040,8 @@ class Detect(nn.Module):
             else:        loss_dfl = (F.l1_loss(ltrb[mask], box2dist(tboxes, sxy, strides)[mask], reduction='none') * weight.unsqueeze(-1)).sum() / tgt_scores_sum
             
             # Class loss (positive samples + negative)
-            loss_cls = F.binary_cross_entropy_with_logits(logits, tcls*tscores.unsqueeze(-1), reduction='sum') / tgt_scores_sum
+            # loss_cls = F.binary_cross_entropy_with_logits(logits, tcls*tscores.unsqueeze(-1), reduction='sum') / tgt_scores_sum
+            loss_cls = focal_loss(logits, probs, tcls*tscores.unsqueeze(-1), gamma=2.0, reduction='sum') / tgt_scores_sum
 
         return pred if not exists(targets) else (pred, {'iou': loss_iou, 'dfl': loss_dfl, 'cls': loss_cls})
         

@@ -266,9 +266,9 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> tal (
 
     // Store device for later then put everything on CPU
     auto device    = pred_boxes.device();
-    pred_boxes     = pred_boxes.to(torch::TensorOptions(torch::Device("cpu")));
-    pred_scores    = pred_scores.to(torch::TensorOptions(torch::Device("cpu")));
-    targets        = targets.to(torch::TensorOptions(torch::Device("cpu")));
+    pred_boxes     = pred_boxes.to(torch::kCPU, torch::kFloat);
+    pred_scores    = pred_scores.to(torch::kCPU, torch::kFloat);
+    targets        = targets.to(torch::kCPU, torch::kFloat);
 
     // Outputs 
     auto boxes      = torch::zeros({B, N, 4});

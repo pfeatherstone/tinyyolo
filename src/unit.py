@@ -43,10 +43,10 @@ def test_export(net: YoloBase):
     net = net.eval()
     x = torch.randn(4, 3, 640, 640)
     _ = net(x) # compile einops kernels just in case
-    torch.onnx.export(net, (x,), dynamo=True, opset_version=23,
+    prog = torch.export.export(net, (x,), dynamic_shapes={'x' : (Dim.DYNAMIC, Dim.STATIC, Dim.DYNAMIC, Dim.DYNAMIC)})
+    torch.onnx.export(prog, dynamo=True, opset_version=23,
                       input_names=['img'],
-                      output_names=['preds'],
-                      dynamic_shapes={'x' : (Dim.DYNAMIC, Dim.STATIC, Dim.DYNAMIC, Dim.DYNAMIC)}).save('/tmp/model.onnx')
+                      output_names=['preds']).save('/tmp/model.onnx')
     netOrt  = ort.InferenceSession('/tmp/model.onnx', providers=['CPUExecutionProvider'])
     x       = torch.randn(2, 3, 576, 768)
     preds1  = net(x) 

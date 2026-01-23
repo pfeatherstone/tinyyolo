@@ -250,7 +250,8 @@ def get_model(model: str, variant: str = ''):
         has_obj = False
 
     elif model == 'yolov7':
-        load_from_yolov7_official(net, '../weights/yolov7.pt')
+        if os.path.exists('../weights/yolov7.pt'):
+            load_from_yolov7_official(net, '../weights/yolov7.pt')
 
     return net, has_obj
 
@@ -272,11 +273,14 @@ def export(model: str, variant: str = '', onnx_path:str = '/tmp/model.onnx'):
     _ = net(x) # warmup all the einops kernels
 
     print(bcolors.OKGREEN, f"Exporting {type(net).__name__} ...", bcolors.ENDC)
-    torch.onnx.export(net, (x,), dynamo=True, opset_version=23,
-                      input_names=['img'],
-                      output_names=['preds'],
-                      dynamic_shapes={'x' : (Dim.DYNAMIC, Dim.STATIC, Dim.DYNAMIC, Dim.DYNAMIC)}).save(onnx_path)
+    prog = torch.export.export(net, (x,), dynamic_shapes={'x' : (Dim.DYNAMIC, Dim.STATIC, Dim.DYNAMIC, Dim.DYNAMIC)})
     print(bcolors.OKGREEN, f"Exporting {type(net).__name__} ... Done", bcolors.ENDC)
+
+    print(bcolors.OKGREEN, f"ONNX {type(net).__name__} ...", bcolors.ENDC)
+    torch.onnx.export(prog, dynamo=True, opset_version=23,
+                      input_names=['img'],
+                      output_names=['preds']).save(onnx_path)
+    print(bcolors.OKGREEN, f"ONNX {type(net).__name__} ... Done", bcolors.ENDC)
 
     print(bcolors.OKGREEN, f"Slimming {type(net).__name__} ...", bcolors.ENDC)
     model           = onnx.load(onnx_path)
@@ -369,3 +373,8 @@ test('yolov26', 'x')
 # export('yolov12', 'm')
 # export('yolov12', 'l')
 # export('yolov12', 'x')
+# export('yolov26', 'n')
+# export('yolov26', 's')
+# export('yolov26', 'm')
+# export('yolov26', 'l')
+# export('yolov26', 'x')

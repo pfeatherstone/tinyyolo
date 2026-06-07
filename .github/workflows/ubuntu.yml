@@ -18,7 +18,7 @@ jobs:
         os: [ubuntu-22.04, ubuntu-24.04]
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - uses: actions/setup-python@v6
         with:
@@ -35,13 +35,13 @@ jobs:
 
       - name: Upload test results
         if: ${{ always() }}
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: pytest-results-${{ matrix.os }}
           path: junit/test-results-${{ matrix.os }}.xml
 
       - name: Test Report
-        uses: dorny/test-reporter@v2
+        uses: dorny/test-reporter@v3
         if: ${{ always() }}
         with:
           name: PyTorch Unit Tests (${{ matrix.os }})
